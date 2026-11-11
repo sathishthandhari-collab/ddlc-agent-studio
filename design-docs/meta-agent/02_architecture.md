@@ -366,6 +366,20 @@ This serves two purposes:
 1. **Resumability** — if the process crashes and restarts, it picks up where it left off. Nothing was lost because nothing was overwritten.
 2. **Auditability** — after the agent is built, you can trace every decision. Why did the architecture change? Because the user requested revisions in round 2, specifically asking for X. The full history is there.
 
+### 5.5 What the Blackboard Does NOT Hold
+
+The blackboard holds **workflow-driving state** — the data the coordinator and specialists need to route, project, and execute. It does **not** hold persistent operational metadata such as:
+
+- **Audit trails** — who approved what, when, with what rationale
+- **Artifact registries** — catalog of every artifact produced across all runs
+- **Execution logs** — detailed per-node timing, token counts, model usage
+- **Event streams** — fine-grained observability data for dashboards and alerts
+- **Governance evaluations** — records of every compliance rule check
+
+These concerns are served by the **Metadata Framework** — a separate set of PostgreSQL tables organized into three tiers (generic agent metadata, DDLC shared metadata, and agent-specific metadata). The metadata framework is defined in [`01_metadata_framework.md`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/metadata-framework/01_metadata_framework.md).
+
+Nodes write to the metadata framework as a **side effect** of execution — either via direct calls or (preferably) via LangGraph callback hooks. The blackboard remains focused on what specialists need to do their job, not on what operators need to see after the fact.
+
 ---
 
 ## 6. Knowledge Architecture — RAG and Portfolio Memory
@@ -846,6 +860,7 @@ This document deliberately does not cover:
 - **Governance enforcement** — How governance flows from spec to agent → `06_governance.md`
 - **Portfolio memory schema** — Tables, queries, embedding strategy → `07_portfolio_memory.md`
 - **RAG pipeline** — Ingestion, chunking, retrieval tuning → `08_rag.md`
+- **Metadata framework** — Persistent operational metadata (audit logs, artifact registries, execution logs, event streams, governance evaluations) → [`design-docs/metadata-framework/01_metadata_framework.md`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/metadata-framework/01_metadata_framework.md)
 - **Prompt engineering** — The actual prompts used inside each specialist → implementation detail
 - **Chainlit UI design** — Chat interface layout → a design specification
 - **Containerization and deployment** — Post-MVP
@@ -860,3 +875,4 @@ This document deliberately does not cover:
 4. **`06_governance.md`** — Governance enforcement: spec → impl docs → generated agent
 5. **`07_portfolio_memory.md`** — Portfolio memory design: agent registry, component index, dependency tracking, semantic search
 6. **`08_rag.md`** — RAG pipeline: document ingestion, domain tagging, embedding, retrieval per specialist
+7. **[`metadata-framework/01_metadata_framework.md`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/metadata-framework/01_metadata_framework.md)** — Three-tier persistent metadata framework: execution logs, artifact registries, audit trails, governance evaluations (iterative — evolves alongside development)
