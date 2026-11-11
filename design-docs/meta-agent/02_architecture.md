@@ -66,13 +66,13 @@
                                        │  │             HUMAN GATES             │    │  └───────────────────────────────┘  │  │
                                        │  │                                     │    │                                     │  │
                                        │  │  [1] Clarification Approval         │    │  ┌───────────────────────────────┐  │  │
-                                       │  │  [2] Architecture Proposal Review   │    │  │       Portfolio Memory        │  │  │
+                                       │  │  [2] Architecture Proposal Review   │    │  │      Metadata Framework       │  │  │
                                        │  │  [3] Implementation Document Review │    │  │     (Postgres Relational)     │  │  │
                                        │  │  [4] Build Fix Escalation Valve     │    │  │                               │  │  │
-                                       │  │                                     │    │  │  • Agent Registry (SQL)       │  │  │
-                                       │  └──────────────────┬──────────────────┘    │  │  • Shared Component Index     │  │  │
-                                       │                     │                       │  │  • Cross-Agent Dependencies   │  │  │
-                                       │                     │                       │  │  • Build History & Metrics    │  │  │
+                                       │  │                                     │    │  │  • Catalog (Agents/Components)│  │  │
+                                       │  └──────────────────┬──────────────────┘    │  │  • Lineage (Dependencies)     │  │  │
+                                       │                     │                       │  │  • Operational (Runs/Logs)    │  │  │
+                                       │                     │                       │  │  • Audit & Governance Logs    │  │  │
                                        │                     │                       │  └───────────────────────────────┘  │  │
                                        │                     │                       └──────────────────┬──────────────────┘  │
                                        │                     │                                          │                     │
@@ -82,7 +82,7 @@
                                        │                     │         (Single Storage Engine)          │                     │
                                        │                     │                                          │                     │
                                        │                     │  • State Checkpoints (Resumability)      │                     │
-                                       │                     │  • Portfolio Relational Tables (SQL)     │                     │
+                                       │                     │  • Metadata Framework Tables (SQL)       │                     │
                                        │                     │  • RAG Embeddings & Vectors (pgvector)   │                     │
                                        │                     └────────────────────┬─────────────────────┘                     │
                                        └──────────────────────────────────────────┴───────────────────────────────────────────┘
@@ -241,13 +241,13 @@ Six domain specialists, each responsible for one concern. Each specialist is a g
 - Select an architecture pattern for the DDLC agent being built (from the pattern catalog — see Section 7)
 - Determine the runtime (LangGraph vs. Python + LiteLLM vs. other, based on agent complexity)
 - Design each stage's high-level implementation approach
-- Identify which shared components from the portfolio can be reused
+- Identify which shared components from the metadata framework (Tier 2 catalog) can be reused
 - Identify what new shared components should be created
 - Map tools and libraries to stages
 - Document risks, trade-offs, and alternatives considered
 - Incorporate revision feedback and re-present
 
-**Knowledge sources**: RAG — architecture pattern catalog, past architecture decisions. Portfolio memory — existing agents, shared components (see Section 6).
+**Knowledge sources**: RAG — architecture pattern catalog, past architecture decisions. Metadata framework (Tier 2 catalog: existing agents, shared components; see Section 6).
 
 **Exits when**: The architecture is approved by the human.
 
@@ -263,7 +263,7 @@ Six domain specialists, each responsible for one concern. Each specialist is a g
 - Ensure all configuration values are externalized (nothing hardcoded)
 - Incorporate revision feedback and re-present
 
-**Knowledge sources**: The approved architecture (from the Architect), shared component interface specs (from the portfolio).
+**Knowledge sources**: The approved architecture (from the Architect), shared component interface specs (from the metadata framework Tier 2 catalog).
 
 **Exits when**: The implementation documents are approved by the human.
 
@@ -278,7 +278,7 @@ Six domain specialists, each responsible for one concern. Each specialist is a g
 - Select the code generation strategy based on the runtime (LangGraph agent, Python script, etc.)
 - Respect project conventions (file structure, naming, code style)
 
-**Knowledge sources**: The approved implementation documents (from the Documentarian), shared component source code (from the portfolio), code conventions (from RAG).
+**Knowledge sources**: The approved implementation documents (from the Documentarian), shared component source code (referenced in the metadata framework), code conventions (from RAG).
 
 **Exits when**: All files are generated.
 
@@ -330,7 +330,7 @@ The projection is not a filter on the blackboard. It is a deliberate design deci
 
 **Researcher** sees: the parsed spec and the clarified requirements (answers that changed the design). It does NOT see: the raw Q&A transcripts, architecture proposals, impl docs.
 
-**Architect** sees: a summary of the parsed spec, the enriched requirements from clarification, the research findings, and the available shared components from the portfolio. It does NOT see: the raw spec YAML, individual Q&A exchanges, build artifacts.
+**Architect** sees: a summary of the parsed spec, the enriched requirements from clarification, the research findings, and the available shared components from the metadata framework (Tier 2 catalog). It does NOT see: the raw spec YAML, individual Q&A exchanges, build artifacts.
 
 **Documentarian** sees: the approved architecture proposal and shared component interface specs. It does NOT see: the raw spec, Q&A history, research details, rejected architecture revisions.
 
@@ -382,9 +382,9 @@ Nodes write to the metadata framework as a **side effect** of execution — eith
 
 ---
 
-## 6. Knowledge Architecture — RAG and Portfolio Memory
+## 6. Knowledge Architecture — RAG and the Metadata Framework
 
-The meta-agent needs external knowledge at several points. This knowledge comes from two sources: the **RAG knowledge base** (documents) and the **portfolio memory** (structured data about previously built agents).
+The meta-agent needs external knowledge and persistent operational data at several points. This comes from two sources: the **RAG knowledge base** (unstructured documents and patterns) and the **Metadata Framework** (structured relational data organized by concern: catalog, lineage, operational, and audit; see [`01_metadata_framework.md`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/metadata-framework/01_metadata_framework.md)).
 
 ### 6.1 RAG — Shared Infrastructure, Domain-Tagged Knowledge
 
@@ -398,23 +398,23 @@ There is one RAG engine — one embedding pipeline, one vector store (pgvector),
 | **Organizational Standards** | Naming conventions, data governance policies, project structure rules, approved tool lists, security requirements | Researcher, Architect |
 | **Architecture Pattern Catalog** | Documented patterns for DDLC agents (see Section 7). Each pattern describes when to use it, what it looks like, what runtime it implies, and what trade-offs it carries. | Architect |
 | **Past Architecture Decisions** | Architecture proposals from previous builds, including what was chosen, what was rejected, and why. Grows with every build. | Architect |
-| **Shared Component Documentation** | Interface specifications, usage examples, and behavioral descriptions for shared components in the portfolio | Architect, Builder |
+| **Shared Component Documentation** | Interface specifications, usage examples, and behavioral descriptions for shared components in the catalog | Architect, Builder |
 | **Code Conventions** | Project code style, test patterns, configuration structure, file naming rules | Builder |
 
 When the Researcher needs to know whether the Snowflake Python connector supports schema evolution, it queries the "Library & Tool Documentation" domain. When the Architect needs to know what pattern was used the last time a streaming agent was built, it queries the "Past Architecture Decisions" domain. Same engine, different document sets.
 
-### 6.2 Portfolio Memory — Structured Relational Data
+### 6.2 Metadata Framework — Structured Relational Data
 
-Portfolio memory is **not RAG**. It is structured data in Postgres relational tables. It answers questions like:
+The metadata framework is **not RAG**. It is structured relational data in Postgres organized across three tiers (generic agent metadata, DDLC shared metadata, and agent-specific metadata) and four concerns (catalog, lineage, operational, audit). It replaces the previous standalone "portfolio memory" concept by unifying all persistent metadata into a single framework. It answers questions like:
 
-- What agents exist? What version are they? What status are they in?
-- What shared components are available? Which agents use them?
-- What are the cross-agent dependencies? If I change Agent A's output contract, which agents break?
-- What was the build history for Agent X?
+- What agents exist? What version are they? What status are they in? (*Catalog: `agent_registry`*)
+- What shared components are available? Which agents use them? (*Catalog & Lineage: `component_registry`, `component_usage`*)
+- What are the cross-agent dependencies? If I change Agent A's output contract, which agents break? (*Lineage: `agent_dependency`, `contract_lineage`*)
+- How did previous build runs perform? What were the revision counts and gate decisions? (*Operational & Audit: `build_summary`, `agent_run_header`, `decision_log`*)
 
-These are SQL queries, not semantic searches. The portfolio is a registry, not a document collection.
+These are SQL queries, not semantic searches. The catalog is a relational registry, not a document collection.
 
-**The one overlap**: shared component discovery. When the Architect wants to find "a component that does something like PII masking," it runs a semantic search over component embeddings stored in pgvector. This is semantically a RAG query (embed the description, find similar vectors), but it searches the component index, not the document collection.
+**The one overlap**: shared component discovery. When the Architect wants to find "a component that does something like PII masking," it runs a semantic search over component embeddings stored in pgvector (`component_registry.embedding` in Tier 2). This is semantically a vector similarity search, but it lives directly inside the metadata framework catalog table rather than the RAG document store.
 
 ### 6.3 Knowledge Flow Through the Process
 
@@ -443,12 +443,13 @@ These are SQL queries, not semantic searches. The portfolio is a registry, not a
                      all specialists
                            │
                     ┌──────┴──────────────────────┐
-                    │     Portfolio Memory          │
-                    │                              │
-                    │  Agent Registry              │
-                    │  Shared Component Index ─────── semantic search (pgvector)
-                    │  Dependency Graph            │
-                    │  Build History               │
+                    │     Metadata Framework      │
+                    │   (3-Tier Postgres Tables)  │
+                    │                             │
+                    │  Catalog (Agents & Comps) ─── semantic search (pgvector)
+                    │  Lineage (Dependencies)    │
+                    │  Operational (Runs & Logs)  │
+                    │  Audit (Gates & Governance) │
                     └─────────────────────────────┘
 ```
 
@@ -478,7 +479,7 @@ The Architect's process:
 
 1. Read the spec requirements — stages, autonomy levels, governance rules, tool requirements
 2. Query the pattern catalog: "Which patterns fit an agent with these characteristics?"
-3. Query the portfolio: "Have I built something similar before? What pattern did I use? How did it work out?"
+3. Query the metadata catalog: "Have I built something similar before? What pattern did I use? How did it work out?"
 4. Select a base pattern
 5. Adapt it — add stages, adjust routing, plug in specific tools
 6. Present the adapted architecture to the human for approval
@@ -530,14 +531,14 @@ This section illustrates how components collaborate across the agent development
 
 ### 8.1 Interaction Flow Diagram
 
-The following sequence diagram details the runtime interactions between the User, Chainlit UI, Coordinator, Specialists, Blackboard State, and Knowledge Layer (RAG & Portfolio DB).
+The following sequence diagram details the runtime interactions between the User, Chainlit UI, Coordinator, Specialists, Blackboard State, and Knowledge & Metadata Layer (RAG & Postgres).
 
 ```
 User / UI               Coordinator             Specialists               Blackboard               Knowledge Layer
-   │                         │                       │                         │                   (RAG & Portfolio)
+   │                         │                       │                         │                   (RAG & Postgres)
    │── Submit Spec ─────────>│                       │                         │                           │
    │                         │── Initialize State ────────────────────────────>│                           │
-   │                         │── Query Portfolio Context ─────────────────────────────────────────────────>│
+   │                         │── Query Metadata Catalog (Tier 2) ─────────────────────────────────────────>│
    │                         │<── Active Agents, Shared Components ────────────────────────────────────────│
    │                         │── Store Initial Context ───────────────────────>│                           │
    │                         │                       │                         │                           │
@@ -602,7 +603,7 @@ User / UI               Coordinator             Specialists               Blackb
    │                         │                       │                         │                           │
    │   [PHASE: DELIVERY]     │                       │                         │                           │
    │                         │── Write Code to Workspace Disk                  │                           │
-   │                         │── Register Agent & Components ─────────────────────────────────────────────>│
+   │                         │── Register Agent & Components in Metadata ─────────────────────────────────>│
    │                         │── Store Arch Decision in RAG ──────────────────────────────────────────────>│
    │<── Delivery Summary ────│                       │                         │                           │
    ▼                         ▼                       ▼                         ▼                           ▼
@@ -612,7 +613,7 @@ User / UI               Coordinator             Specialists               Blackb
 
 **Phase 1 — Setup**
 
-The coordinator loads portfolio context from the database. What agents already exist? What shared components are available? What cross-agent dependencies exist? This context is written to the blackboard so that every downstream specialist has awareness of the current portfolio state.
+The coordinator loads catalog context from the metadata framework (Tier 2). What agents already exist? What shared components are available? What cross-agent dependencies exist? This context is written to the blackboard so that downstream specialists have awareness of existing assets.
 
 **Phase 2 — Understanding**
 
@@ -630,13 +631,13 @@ The Researcher queries the RAG knowledge base for library and tool documentation
 
 It produces a feasibility verdict: feasible, feasible with caveats, or not feasible. If not feasible, the coordinator routes to a human gate to discuss alternatives.
 
-Separately (but in the same phase), a semantic search runs against the shared component index in the portfolio. Are there existing components that can be reused for this agent? Results are written to the blackboard for the Architect.
+Separately (but in the same phase), a semantic search runs against the shared component registry in the metadata framework (Tier 2). Are there existing components that can be reused for this agent? Results are written to the blackboard for the Architect.
 
 **Phase 4 — Design**
 
 The Architect specialist takes over. Its projected context includes a summary of the parsed spec, the enriched requirements from clarification, the research findings, and the available shared components.
 
-The Architect queries the pattern catalog in the RAG knowledge base and the portfolio's past architecture decisions. It selects a base pattern, adapts it, selects tools, identifies reusable components, documents risks and trade-offs, and produces an architecture proposal.
+The Architect queries the pattern catalog and past architecture decisions in the RAG knowledge base, plus existing components in the metadata framework. It selects a base pattern, adapts it, selects tools, identifies reusable components, documents risks and trade-offs, and produces an architecture proposal.
 
 The coordinator pauses at a human gate. The user reviews the architecture. If approved, the process advances. If revisions are requested, the Architect incorporates feedback and re-presents. The coordinator tracks revision count and enforces a maximum.
 
@@ -662,7 +663,7 @@ The Validator runs a series of checks: contract compliance, governance complianc
 
 **Phase 8 — Delivery**
 
-The coordinator writes all generated files to the agent's project directory, registers the agent in the portfolio database, registers new shared components, records cross-agent dependencies, and presents a summary to the user.
+The coordinator writes all generated files to the agent's project directory, registers the agent, new shared components, and cross-agent dependencies in the metadata framework (Tier 2 catalog and lineage), and presents a summary to the user.
 
 The architecture decision and its outcome are stored as a "past architecture decision" in the RAG knowledge base, enriching the pattern catalog for future builds.
 
@@ -670,11 +671,11 @@ The architecture decision and its outcome are stored as a "past architecture dec
 
 The change flow reuses the same specialists and infrastructure, but enters at a different point.
 
-**Phase 1 — Setup**: Same as new build. Load portfolio context.
+**Phase 1 — Setup**: Same as new build. Load catalog and lineage context from the metadata framework.
 
-**Phase 2 — Change Analysis**: The Spec Analyst receives the change request (natural language or edited spec). It identifies the target agent, loads its current implementation documents from the portfolio, and structures the change.
+**Phase 2 — Change Analysis**: The Spec Analyst receives the change request (natural language or edited spec). It identifies the target agent, loads its current implementation documents from the metadata framework (Tier 1 artifact registry), and structures the change.
 
-**Phase 3 — Impact Analysis**: The Architect evaluates the impact. Which stages are affected? Which contracts change? Which governance rules need updating? Are there downstream agents that consume the affected contracts? The portfolio's dependency tracking (relational SQL, not RAG) answers the cross-agent questions.
+**Phase 3 — Impact Analysis**: The Architect evaluates the impact. Which stages are affected? Which contracts change? Which governance rules need updating? Are there downstream agents that consume the affected contracts? The metadata framework's dependency and contract lineage tracking (Tier 2 `agent_dependency` and `contract_lineage`, relational SQL) answers the cross-agent questions.
 
 **Phase 4 — Documentation Update**: The Documentarian updates the affected implementation documents, keeping all contracts and cross-references in sync.
 
@@ -715,7 +716,7 @@ From day one, the meta-agent tracks operational metrics in the build history. Th
 - **Build fix attempts**: How many validation failures required re-generation? Trending down means the Builder's code quality is improving.
 - **Total duration**: How long from spec submission to delivery? Identifies bottlenecks.
 
-These metrics are stored in the portfolio database as part of build history. No additional infrastructure needed.
+These metrics are stored in the metadata framework (`ddlc_shared_metadata.build_summary` and `agent_metadata.execution_log`) as part of operational history. No additional infrastructure needed.
 
 ### 9.3 Post-MVP Evaluation
 
@@ -731,7 +732,7 @@ Three evaluation capabilities to add after the core system is working:
 
 ## 10. Folder Structure
 
-The meta-agent codebase is organized cleanly around the architectural boundaries defined in this document: the deterministic coordinator, isolated domain specialists, the blackboard state model, the knowledge layer (RAG & Portfolio), and the user interface.
+The meta-agent codebase is organized cleanly around the architectural boundaries defined in this document: the deterministic coordinator, isolated domain specialists, the blackboard state model, the knowledge layer (RAG), the unified metadata framework, and the user interface.
 
 ```
 meta-agent/
@@ -780,11 +781,11 @@ meta-agent/
 │   │   ├── projections.py       # State projection mappers (focused slices per specialist)
 │   │   └── checkpointer.py      # PostgreSQL state persistence and snapshot recovery
 │   │
-│   ├── portfolio/               # Portfolio memory (PostgreSQL relational storage)
-│   │   ├── registry.py          # Agent metadata, versions, and lifecycle status
-│   │   ├── components.py        # Shared component index & semantic search interface
-│   │   ├── dependencies.py      # Cross-agent contract dependency tracking
-│   │   └── history.py           # Build runs, operational metrics, and revision logs
+│   ├── metadata/                # Metadata framework client & schema management
+│   │   ├── catalog.py           # Agent and component registry queries (Tier 2)
+│   │   ├── lineage.py           # Cross-agent dependencies & contract lineage (Tier 2)
+│   │   ├── callbacks.py         # LangGraph callback hooks for operational & audit logging (Tier 1)
+│   │   └── ddl/                 # Tier 3 DDL generator (for human review / future DCM agent)
 │   │
 │   ├── rag/                     # Shared RAG engine (pgvector vector store)
 │   │   ├── embeddings.py        # Vector embedding generation (domain-tagged)
@@ -814,7 +815,7 @@ meta-agent/
 - **`src/coordinator/`**: Contains only deterministic graph logic. No LLM prompts or reasoning live here. It maps state transitions, coordinates subgraphs, and halts at human gates.
 - **`src/specialists/`**: Contains LLM-powered domain workers. Each specialist directory is encapsulated with its prompts, Instructor structured output models, and domain tools. The Builder sub-package isolates runtime strategies, making adding a new agent runtime as simple as adding a new strategy file.
 - **`src/state/`**: Defines the shared Blackboard schema and the projection functions that produce narrow slices for specialists. Manages Postgres checkpointer connection.
-- **`src/portfolio/`**: Manages relational queries for agent metadata, shared components, cross-agent dependencies, and operational counters. Uses SQL queries, not document RAG.
+- **`src/metadata/`**: Implements the client interface for the unified 3-tier metadata framework (catalog, lineage, operational, audit). Manages LangGraph callback hooks for automatic logging and provides isolated DDL generation for Tier 3 schemas.
 - **`src/rag/`**: Implements the shared embedding and pgvector retrieval engine, providing filtered semantic queries per domain.
 - **`src/ui/`**: Provides the Chainlit chat interface, streaming token output, and UI components for the four human gates.
 - **`tests/`**: Contains unit tests for graph edges and projections, integration tests for subgraphs, and reference benchmark specs for end-to-end regression testing.
@@ -835,14 +836,17 @@ All architecture-level decisions made in this document:
 | 6 | Context management | State projection — each specialist gets a slice, not the whole blackboard | Keeps each specialist's context focused and within token limits. The funnel principle ensures each phase's output is smaller than its input. |
 | 7 | Summarization at phase boundaries | Explicit compression when crossing from one phase to the next | Only the approved/resolved output of a phase is projected forward. Rejected revisions, raw Q&A transcripts, and intermediate research are not projected. |
 | 8 | RAG architecture | Shared infrastructure, domain-tagged knowledge | One embedding pipeline, one vector store, one retrieval mechanism. Documents tagged by domain. Each specialist queries its relevant domain. |
-| 9 | Portfolio memory | Relational tables in Postgres (SQL queries, not RAG) | Agent registry, component index, dependency tracking, build history. Structured data, not documents. SQL is the right query language. |
-| 10 | Shared component discovery | Semantic search via pgvector on component embeddings | The one place where portfolio memory uses vector search. "Find something like a PII masker" is a semantic query, not a SQL query. |
+| 9 | Unified Metadata Framework | 3-tier Postgres schemas (catalog, lineage, operational, audit) | Absorbed standalone 'portfolio memory' into Tier 2. Follows industry metadata platform patterns (DataHub, Unity Catalog). Reusable, domain-specific, and isolated. |
+| 10 | Shared component discovery | Semantic search via pgvector on component embeddings | Supported via vector column on `component_registry` within Tier 2 metadata. "Find something like a PII masker" is a semantic query directly on catalog data. |
 | 11 | Different agent architectures | Pattern catalog (in RAG) + runtime-agnostic impl docs + Builder generation strategies | The Architect selects from a pattern catalog. The impl docs describe what, not how. The Builder has per-runtime strategies. New runtimes = new strategies, no workflow changes. |
 | 12 | Pattern catalog growth | Past architecture decisions stored in RAG after every build | The catalog grows with experience. The tenth build benefits from the patterns of the first nine. Portfolio-level learning. |
 | 13 | Evaluation at MVP | Human gates + structural validation + operational metrics | No separate eval framework needed. Human gates are the strongest signal. Counters track improvement over time. |
 | 14 | Evaluation post-MVP | Spec-to-output traceability, reference spec test suite, contract simulation | Added when optimizing, not when building. Reduces human review burden and enables regression testing. |
 | 15 | Safety valves | Maximum iteration counts on all loops | Enforced by the coordinator. Clarification, architecture revision, impl doc revision, and build fix loops all have configurable maximums. Escalate to human on exhaustion. |
 | 16 | Change flow reuse | Maintenance flow reuses Documentation, Construction, and Validation phases | Same specialists, same logic, different entry state. No code duplication between build and change flows. |
+| 17 | Metadata write mechanism | LangGraph callback hooks | Keeps metadata writes out of specialist logic. Callback hooks intercept node lifecycle events (start, complete, error) and write metadata as a side effect. |
+| 18 | Tier 3 schema provisioning | Meta-agent generates DDL, human executes (Option B) | Simple, controlled for MVP. DDL generation is isolated in `src/metadata/ddl/` so a future DCM agent can absorb it autonomously. |
+| 19 | Metadata retention | Keep everything | Permanent retention across all tiers for MVP. Archival/aggregation policies deferred until volume demands it. |
 
 ---
 
@@ -858,9 +862,9 @@ This document deliberately does not cover:
 - **The implementation doc schema** — Full schema for impl docs → `04_impl_doc_schema.md`
 - **Builder generation strategies** — How code is generated per runtime → `05_builder.md`
 - **Governance enforcement** — How governance flows from spec to agent → `06_governance.md`
-- **Portfolio memory schema** — Tables, queries, embedding strategy → `07_portfolio_memory.md`
-- **RAG pipeline** — Ingestion, chunking, retrieval tuning → `08_rag.md`
-- **Metadata framework** — Persistent operational metadata (audit logs, artifact registries, execution logs, event streams, governance evaluations) → [`design-docs/metadata-framework/01_metadata_framework.md`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/metadata-framework/01_metadata_framework.md)
+- **RAG pipeline** — Ingestion, chunking, retrieval tuning → `07_rag.md`
+- **Metadata framework DDL & client** — Column-level DDL, callback implementation, Tier 3 generators → [`design-docs/metadata-framework/01_metadata_framework.md`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/metadata-framework/01_metadata_framework.md)
+- **DCM Agent Design** — Dedicated Data Catalog Management agent for autonomous schema lifecycle → `08_dcm_agent.md` (post-MVP)
 - **Prompt engineering** — The actual prompts used inside each specialist → implementation detail
 - **Chainlit UI design** — Chat interface layout → a design specification
 - **Containerization and deployment** — Post-MVP
@@ -873,6 +877,6 @@ This document deliberately does not cover:
 2. **`04_impl_doc_schema.md`** — Full schema for implementation documents
 3. **`05_builder.md`** — How the builder reads impl docs and generates agent code per runtime
 4. **`06_governance.md`** — Governance enforcement: spec → impl docs → generated agent
-5. **`07_portfolio_memory.md`** — Portfolio memory design: agent registry, component index, dependency tracking, semantic search
-6. **`08_rag.md`** — RAG pipeline: document ingestion, domain tagging, embedding, retrieval per specialist
-7. **[`metadata-framework/01_metadata_framework.md`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/metadata-framework/01_metadata_framework.md)** — Three-tier persistent metadata framework: execution logs, artifact registries, audit trails, governance evaluations (iterative — evolves alongside development)
+5. **[`metadata-framework/01_metadata_framework.md`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/metadata-framework/01_metadata_framework.md)** — Unified three-tier metadata framework: catalog, lineage, operational, and audit schemas (iterative — evolves alongside development)
+6. **`07_rag.md`** — RAG pipeline: document ingestion, domain tagging, embedding, retrieval per specialist
+7. **`08_dcm_agent_concept.md`** — DCM (Data Catalog Management) agent: autonomous schema lifecycle and migrations (post-MVP)
