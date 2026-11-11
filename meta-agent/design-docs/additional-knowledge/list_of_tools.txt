@@ -1,0 +1,4 @@
+snowflake
+databricks
+pyspark
+kafka
