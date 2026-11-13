@@ -781,11 +781,11 @@ meta-agent/
 │   │   ├── projections.py       # State projection mappers (focused slices per specialist)
 │   │   └── checkpointer.py      # PostgreSQL state persistence and snapshot recovery
 │   │
-│   ├── metadata/                # Metadata framework client & schema management
+│   ├── metadata/                # Metadata framework client & callback hooks
 │   │   ├── catalog.py           # Agent and component registry queries (Tier 2)
 │   │   ├── lineage.py           # Cross-agent dependencies & contract lineage (Tier 2)
 │   │   ├── callbacks.py         # LangGraph callback hooks for operational & audit logging (Tier 1)
-│   │   └── ddl/                 # Tier 3 DDL generator (for human review / future DCM agent)
+│   │   └── dcm_client.py        # Client interface to call the DCM Agent for Tier 3 schema creation
 │   │
 │   ├── rag/                     # Shared RAG engine (pgvector vector store)
 │   │   ├── embeddings.py        # Vector embedding generation (domain-tagged)
@@ -815,7 +815,7 @@ meta-agent/
 - **`src/coordinator/`**: Contains only deterministic graph logic. No LLM prompts or reasoning live here. It maps state transitions, coordinates subgraphs, and halts at human gates.
 - **`src/specialists/`**: Contains LLM-powered domain workers. Each specialist directory is encapsulated with its prompts, Instructor structured output models, and domain tools. The Builder sub-package isolates runtime strategies, making adding a new agent runtime as simple as adding a new strategy file.
 - **`src/state/`**: Defines the shared Blackboard schema and the projection functions that produce narrow slices for specialists. Manages Postgres checkpointer connection.
-- **`src/metadata/`**: Implements the client interface for the unified 3-tier metadata framework (catalog, lineage, operational, audit). Manages LangGraph callback hooks for automatic logging and provides isolated DDL generation for Tier 3 schemas.
+- **`src/metadata/`**: Implements the client interface for the unified 3-tier metadata framework (catalog, lineage, operational, audit). Manages LangGraph callback hooks for automatic logging and provides a client to call the DCM Agent for Tier 3 schema creation during builds.
 - **`src/rag/`**: Implements the shared embedding and pgvector retrieval engine, providing filtered semantic queries per domain.
 - **`src/ui/`**: Provides the Chainlit chat interface, streaming token output, and UI components for the four human gates.
 - **`tests/`**: Contains unit tests for graph edges and projections, integration tests for subgraphs, and reference benchmark specs for end-to-end regression testing.
@@ -845,7 +845,7 @@ All architecture-level decisions made in this document:
 | 15 | Safety valves | Maximum iteration counts on all loops | Enforced by the coordinator. Clarification, architecture revision, impl doc revision, and build fix loops all have configurable maximums. Escalate to human on exhaustion. |
 | 16 | Change flow reuse | Maintenance flow reuses Documentation, Construction, and Validation phases | Same specialists, same logic, different entry state. No code duplication between build and change flows. |
 | 17 | Metadata write mechanism | LangGraph callback hooks | Keeps metadata writes out of specialist logic. Callback hooks intercept node lifecycle events (start, complete, error) and write metadata as a side effect. |
-| 18 | Tier 3 schema provisioning | Meta-agent generates DDL, human executes (Option B) | Simple, controlled for MVP. DDL generation is isolated in `src/metadata/ddl/` so a future DCM agent can absorb it autonomously. |
+| 18 | Schema provisioning | DCM Agent (MVP — built first) | Dedicated lightweight CLI agent manages all schema lifecycle. Creates Tiers 1-2, generates Tier 3 per agent. Proves the core stack before the meta-agent is built. See [`metadata-framework/02_dcm_agent.md`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/metadata-framework/02_dcm_agent.md). |
 | 19 | Metadata retention | Keep everything | Permanent retention across all tiers for MVP. Archival/aggregation policies deferred until volume demands it. |
 
 ---
@@ -864,7 +864,7 @@ This document deliberately does not cover:
 - **Governance enforcement** — How governance flows from spec to agent → `06_governance.md`
 - **RAG pipeline** — Ingestion, chunking, retrieval tuning → `07_rag.md`
 - **Metadata framework DDL & client** — Column-level DDL, callback implementation, Tier 3 generators → [`design-docs/metadata-framework/01_metadata_framework.md`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/metadata-framework/01_metadata_framework.md)
-- **DCM Agent Design** — Dedicated Data Catalog Management agent for autonomous schema lifecycle → `08_dcm_agent.md` (post-MVP)
+- **DCM Agent** — Lightweight CLI agent for schema lifecycle management (MVP — built first) → [`design-docs/metadata-framework/02_dcm_agent.md`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/metadata-framework/02_dcm_agent.md)
 - **Prompt engineering** — The actual prompts used inside each specialist → implementation detail
 - **Chainlit UI design** — Chat interface layout → a design specification
 - **Containerization and deployment** — Post-MVP
@@ -878,5 +878,5 @@ This document deliberately does not cover:
 3. **`05_builder.md`** — How the builder reads impl docs and generates agent code per runtime
 4. **`06_governance.md`** — Governance enforcement: spec → impl docs → generated agent
 5. **[`metadata-framework/01_metadata_framework.md`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/metadata-framework/01_metadata_framework.md)** — Unified three-tier metadata framework: catalog, lineage, operational, and audit schemas (iterative — evolves alongside development)
-6. **`07_rag.md`** — RAG pipeline: document ingestion, domain tagging, embedding, retrieval per specialist
-7. **`08_dcm_agent_concept.md`** — DCM (Data Catalog Management) agent: autonomous schema lifecycle and migrations (post-MVP)
+6. **[`metadata-framework/02_dcm_agent.md`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/metadata-framework/02_dcm_agent.md)** — DCM Agent: lightweight CLI agent for schema lifecycle management (MVP — **build first**, before the meta-agent)
+7. **`07_rag.md`** — RAG pipeline: document ingestion, domain tagging, embedding, retrieval per specialist

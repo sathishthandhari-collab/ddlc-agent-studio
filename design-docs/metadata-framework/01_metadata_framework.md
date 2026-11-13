@@ -63,8 +63,9 @@ The metadata framework is organized into three tiers, each building on the previ
 │   Schema: ddlc_shared_metadata                                                  │
 │                                                                                 │
 │   Tier 1 tables + DDLC-specific shared tables. Agent registry, component        │
-│   catalog, contract lineage, stage execution, governance audit, data quality    │
-│   — concepts every DDLC agent has but that are DDLC-domain-specific.            │
+│   catalog, contract lineage, stage execution, governance audit, data quality,   │
+│   configuration snapshot — concepts every DDLC agent has but that are           │
+│   DDLC-domain-specific.                                                         │
 │                                                                                 │
 │   Shared across all DDLC agents. Cross-agent queries live here.                 │
 │   Absorbs all former "portfolio memory" tables.                                 │
@@ -75,8 +76,8 @@ The metadata framework is organized into three tiers, each building on the previ
 │   Schema: agent_metadata                                                        │
 │                                                                                 │
 │   Framework-level tables common to ANY agent, not DDLC-specific.                │
-│   Execution log, artifact registry, decision log, event log, audit log,         │
-│   agent run header, configuration snapshot, error catalog.                       │
+│   Execution log, artifact registry, artifact manifest, decision log,            │
+│   audit log, agent run header.                                                  │
 │                                                                                 │
 │   Reusable by any agent system — the meta-agent, DDLC agents, or future agents. │
 │                                                                                 │
@@ -110,37 +111,38 @@ Within each tier, tables group into four concerns:
 
 **Schema**: `agent_metadata`
 
-These tables are universal — any agent (meta-agent, DDLC agents, future agents) can use them. They capture the fundamental operational concerns that every agent system needs.
+> **Detailed Column-Level Specification**: See [`tier_1_data_dictionary.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/metadata-framework/tier_1_data_dictionary.md) for full PK/FK constraints, PostgreSQL data types, and index definitions.
+
+These tables are universal — any agent (meta-agent, DDLC agents, future agents) can use them. They capture the fundamental operational concerns that every agent system needs: execution tracking, artifact catalogs, security audit trails, and explainability/decision records.
 
 ### 3.1 Catalog Tables
 
-| Table | Purpose | Key Columns (Conceptual) |
-|---|---|---|
-| **`artifact_registry`** | Central catalog of every artifact produced across all runs. | `artifact_id`, `run_id`, `artifact_type` (spec, architecture, impl_doc, code, test, config), `artifact_name`, `version`, `storage_path`, `checksum`, `created_at`, `created_by_node` |
-| **`artifact_manifest`** | Maps which artifacts belong to a given run — the "bill of materials." | `manifest_id`, `run_id`, `artifact_id`, `role` (input/output/intermediate), `phase_produced` |
+| Table | Description |
+|---|---|
+| **`artifact_registry`** | Central catalog of every artifact produced across all runs or registered as seed inputs. Holds immutable asset identity, storage URI, and cryptographic checksum. |
+| **`artifact_manifest`** | Maps which artifacts belong to a given run — the "bill of materials" that captures input vs. output lineage per run and step. |
 
 ### 3.2 Operational Tables
 
-| Table | Purpose | Key Columns (Conceptual) |
-|---|---|---|
-| **`agent_run_header`** | One row per agent execution run. The "master record" that all other tables FK to. | `run_id`, `agent_id`, `agent_version`, `run_mode` (build/change/rerun), `initiated_by`, `started_at`, `completed_at`, `final_status`, `parent_run_id` (for sub-runs) |
-| **`execution_log`** | Ordered log of every node/step executed within a run. | `log_id`, `run_id`, `node_name`, `phase`, `sequence_number`, `started_at`, `completed_at`, `status`, `input_token_count`, `output_token_count`, `model_used`, `duration_ms` |
-| **`event_log`** | Fine-grained event stream for observability. Designed for consumption by dashboards, alerts, and replay. | `event_id`, `run_id`, `event_type`, `event_source` (node/coordinator/gate/system), `payload` (JSONB), `severity` (info/warn/error), `timestamp` |
-| **`error_catalog`** | Structured record of every error encountered, with classification. | `error_id`, `run_id`, `node_name`, `error_type` (validation/llm/timeout/infrastructure), `error_code`, `message`, `stack_trace`, `recoverable`, `resolution` (retry/fix/escalate), `timestamp` |
-| **`config_snapshot`** | Captures the full configuration state at the start of each run. Enables exact reproduction. | `snapshot_id`, `run_id`, `config_type` (model_tiers/safety_valves/settings), `config_body` (JSONB), `captured_at` |
+| Table | Description |
+|---|---|
+| **`agent_run_header`** | One row per agent execution run. The "master record" that all other tables FK to, capturing run lifecycle, status, triggering actor, and token/cost metrics. |
+| **`execution_log`** | Ordered log of every node/step/span executed within a run (with parent-child hierarchy and retry tracking). Records step timing, tokens, model, status, and full error details if failed. |
 
 ### 3.3 Audit Tables
 
-| Table | Purpose | Key Columns (Conceptual) |
-|---|---|---|
-| **`audit_log`** | Immutable, append-only security/compliance audit trail. Who did what, when, from where. | `audit_id`, `run_id`, `action` (submit_spec, approve_gate, reject_gate, override, config_change), `actor`, `actor_type` (human/system), `target_entity`, `before_state`, `after_state`, `timestamp`, `ip_address` |
-| **`decision_log`** | Records every significant decision point: what was decided, who decided, and why. | `decision_id`, `run_id`, `node_name`, `decision_type` (routing/approval/rejection/escalation), `decision_value`, `decided_by` (human/system), `rationale`, `timestamp` |
+| Table | Description |
+|---|---|
+| **`audit_log`** | Immutable, append-only security/compliance audit trail. Records who did what, when, from where, focusing on identity, permissions, and state changes (enforced via DB triggers). |
+| **`decision_log`** | Records every significant decision point (both pending and decided): routing rationale, model escalations, and human gate evaluations. |
 
 ### 3.4 Design Principles
 
 - **`run_id` is the universal FK**: Every table ties back to `agent_run_header.run_id`. You can reconstruct everything about a run by joining on it.
-- **Append-only where it matters**: `audit_log` and `event_log` are strictly append-only. No updates, no deletes.
-- **JSONB for flexible payloads**: `event_log.payload` and `config_snapshot.config_body` use JSONB for schema-flexible data that varies by event type or config version.
+- **Append-only where it matters**: `audit_log` is strictly append-only. No updates, no deletes.
+- **Unified telemetry in `execution_log`**: Following OpenTelemetry and workflow engine best practices, execution steps and errors are unified. Step-level failures are recorded directly on `execution_log` with error type and stack trace rather than splitting across redundant tables (eliminating separate `error_catalog` and `event_log` tables).
+- **Decoupled asset registry and run manifest**: `artifact_registry` manages immutable assets while `artifact_manifest` captures input/output provenance per run, enabling complete cross-run lineage.
+- **JSONB for flexible payloads**: Dynamic context details in `audit_log`, `execution_log`, and `decision_log` use JSONB for schema-flexible data without DDL changes.
 - **Timestamps everywhere**: Every row carries a `timestamp` or `created_at`. The metadata framework is a timeline.
 
 ---
@@ -174,6 +176,7 @@ These tables capture concepts specific to the Data Development Lifecycle — age
 | **`build_summary`** | Aggregated summary of each build run — operational metrics and revision counts. *(Formerly "portfolio memory — build history".)* | `build_id`, `run_id`, `agent_id`, `spec_version`, `clarification_rounds`, `architecture_revisions`, `impl_doc_revisions`, `build_fix_attempts`, `total_duration_ms`, `outcome` (success/partial/failed), `completed_at` |
 | **`stage_execution`** | Records every stage execution across all DDLC agents. Answers: "How did Stage X perform for Agent Y on this run?" | `stage_exec_id`, `run_id`, `agent_id`, `stage_id`, `stage_name`, `stage_type`, `started_at`, `completed_at`, `status`, `records_in`, `records_out`, `records_quarantined` |
 | **`data_quality_summary`** | Aggregated quality metrics per stage per run. Feeds quality dashboards. | `quality_id`, `run_id`, `agent_id`, `stage_id`, `total_records`, `valid_records`, `quarantined_records`, `quality_score`, `rules_evaluated`, `rules_passed`, `rules_failed`, `timestamp` |
+| **`config_snapshot`** | Captures the full configuration state (model tiers, safety valve settings, stage parameters, prompt template versions) for DDLC agents to guarantee complete run reproducibility. *(Detailed design to be finalized later).* | `snapshot_id`, `run_id`, `agent_id`, `config_type` (model_tiers/safety_valves/pipeline_settings/prompt_templates), `config_body` (JSONB), `captured_at` |
 
 ### 4.4 Audit Tables
 
@@ -265,13 +268,13 @@ Metadata writes happen via **LangGraph callback hooks** that intercept node life
 
 | Event | Blackboard Action | Metadata Action (via callbacks) |
 |---|---|---|
-| Run begins | Initialize state with spec | Write `agent_run_header`, `config_snapshot` |
+| Run begins | Initialize state with spec | Write `agent_run_header` (and Tier 2 `config_snapshot` for DDLC runs) |
 | Node starts executing | Update current phase/node flags | Write `execution_log` entry (started) |
-| Node completes | Write results to blackboard fields | Update `execution_log` entry (completed), write `event_log` |
+| Node completes | Write results to blackboard fields | Update `execution_log` entry (completed) |
 | Artifact produced | Store artifact reference in blackboard (for projection) | Write `artifact_registry`, `artifact_manifest` |
-| Human gate reached | Set gate flag, pause | Write `decision_log` (pending), `event_log` |
+| Human gate reached | Set gate flag, pause | Write `decision_log` (pending) |
 | Human approves/rejects | Update approval flag, resume | Write `decision_log` (decided), `audit_log` |
-| Error occurs | Write error flag (for routing) | Write `error_catalog`, `event_log` |
+| Error occurs | Write error flag (for routing) | Update `execution_log` (failed status, error message, stack trace) |
 | Stage executes (DDLC agent) | Update stage completion in workflow state | Write `stage_execution`, `data_quality_summary`, `governance_audit` |
 | Run completes | Set terminal state | Update `agent_run_header` (final_status, completed_at) |
 | Agent delivered | — | Write `agent_registry`, `component_registry`, `agent_dependency`, `build_summary` |
@@ -305,18 +308,33 @@ All three schemas live in the same Postgres database alongside the LangGraph che
 
 ## 8. Schema Provisioning Strategy
 
-### Tiers 1 & 2 — Pre-provisioned
+All schema lifecycle — creation, evolution, migration — is managed by the **DCM (Data Catalog Management) Agent**, the first agent built in the DDLC Agent Studio. See [`02_dcm_agent.md`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/metadata-framework/02_dcm_agent.md) for the full design.
 
-Tiers 1 and 2 are created once during initial setup. Their DDL is version-controlled in the project repository and applied manually.
+### Bootstrap (One-Time Manual Seed)
 
-### Tier 3 — Generated by Meta-Agent, Executed by Human
+The DCM agent's own `dcm_metadata` schema (migration history, schema snapshots, naming conventions) is created via a one-time manual `bootstrap.sql` script. This is the **only manual DDL** in the system.
 
-When the meta-agent builds a new DDLC agent, it generates Tier 3 DDL as part of the build output — alongside the agent code, configuration, and tests. The human reviews the DDL and executes it manually.
+### Tiers 1 & 2 — Created by DCM Agent
 
-This is the **Option B** approach — simple and human-controlled for MVP. The system is designed so that a future **DCM (Data Catalog Management) agent** could absorb the DDL generation logic and handle schema lifecycle (creation, migration, evolution) autonomously. But that is a post-MVP concern.
+After bootstrap, the DCM agent creates the `agent_metadata` (Tier 1) and `ddlc_shared_metadata` (Tier 2) schemas. All DDL is tracked in `dcm_metadata.migration_history`.
+
+### Tier 3 — Generated by DCM Agent on Behalf of Meta-Agent
+
+When the meta-agent builds a new DDLC agent, the Builder specialist calls the DCM agent to generate and apply the agent-specific schema (`ddlc_{agent}_metadata`).
+
+### Schema Evolution During Development
+
+During iterative development, the human interacts with the DCM agent directly via CLI to evolve tables:
+
+```
+$ dcm "add a retry_count integer column to execution_log with default 0"
+→ DCM validates, generates ALTER, auto-applies (non-destructive), records migration.
+```
+
+Destructive operations (ALTER type, RENAME, DROP) require human approval. Additive operations (CREATE, ADD COLUMN) auto-apply for iteration speed.
 
 > [!NOTE]
-> The DDL generation logic should be isolated into its own module within the Builder specialist, making it easy to extract into a DCM agent later.
+> The DCM agent is the **first agent built** — before the meta-agent. It proves the core stack (LiteLLM, Instructor, Postgres) and creates the metadata infrastructure the meta-agent depends on.
 
 ---
 
@@ -330,21 +348,21 @@ This is the **Option B** approach — simple and human-controlled for MVP. The s
 | 4 | Organize by concern | Catalog, Lineage, Operational, Audit | Follows industry-standard metadata platform organization. Makes cross-cutting queries natural. |
 | 5 | Schema-per-tier in Postgres | `agent_metadata`, `ddlc_shared_metadata`, `ddlc_{agent}_metadata` | Clean namespace isolation. Drop a tier or agent without affecting others. Standard Postgres schema search_path management. |
 | 6 | Audit log is append-only | No UPDATE or DELETE on `audit_log` | Compliance requirement. Audit trails must be immutable. |
-| 7 | JSONB for flexible payloads | `event_log.payload`, `config_snapshot.config_body`, `governance_audit.details` | Event types and config formats evolve faster than the table schema. JSONB accommodates this without DDL changes. |
+| 7 | JSONB for flexible payloads | `execution_log.details`, `decision_log.details`, `config_snapshot.config_body`, `governance_audit.details` | Dynamic payloads and configuration formats evolve faster than table schemas. JSONB accommodates this without DDL changes. |
 | 8 | Metadata write mechanism | LangGraph callback hooks | Keeps metadata writes out of specialist logic. Callback hooks intercept node lifecycle events (start, complete, error) and write metadata as a side effect. Clean separation. |
 | 9 | Retention policy | Keep everything | Start simple. Add archival/aggregation if volume becomes a problem. No premature optimization. |
-| 10 | Tier 3 schema provisioning | Meta-agent generates DDL, human executes | Option B — simple and human-controlled for MVP. Designed for future DCM agent to absorb this responsibility. |
-| 11 | Event log format | Custom JSONB | No premature standardization (CloudEvents, OpenTelemetry). Start with custom format, evolve if integration needs arise. |
+| 10 | Schema provisioning | DCM Agent (MVP) | Dedicated lightweight agent manages all schema lifecycle — creation, evolution, migration tracking. First agent built. Proves the core stack. See [`02_dcm_agent.md`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/metadata-framework/02_dcm_agent.md). |
+| 11 | Streamlined Tier 1 tables | Option A (6 core tables) | Dropped redundant `event_log` and `error_catalog` tables. Node telemetry and errors are captured directly in `execution_log` (aligned with OpenTelemetry spans). Moved `config_snapshot` to Tier 2 for domain reproducibility. |
 | 12 | `build_summary` vs. `agent_run_header` | `build_summary` in Tier 2 aggregates from `agent_run_header` in Tier 1 | `agent_run_header` is the generic per-run record. `build_summary` adds DDLC-specific counters (clarification rounds, architecture revisions). Could become a view/materialized view over `agent_run_header` — resolve during implementation. |
 
 ---
 
 ## 10. Next Steps
 
-1. **Detailed DDL** — Column-level definitions, data types, indexes, constraints, and partitioning strategy for each table
-2. **Metadata callback design** — The LangGraph callback hooks that intercept node lifecycle events and write metadata
-3. **Dashboard design** — What operational dashboards consume from the metadata framework
-4. **DCM agent feasibility** — Design doc for a future Data Catalog Management agent that handles schema lifecycle
+1. **Detailed DDL / Data Dictionary** — Tier 1 column definitions, data types, indexes, and constraints are defined in [`tier_1_data_dictionary.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/metadata-framework/tier_1_data_dictionary.md); Tier 2 & Tier 3 data dictionaries will follow.
+2. **[`02_dcm_agent.md`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/metadata-framework/02_dcm_agent.md)** — DCM Agent design: lightweight CLI agent for schema lifecycle management (MVP — build first)
+3. **Metadata callback design** — The LangGraph callback hooks that intercept node lifecycle events and write metadata
+4. **Dashboard design** — What operational dashboards consume from the metadata framework
 
 ---
 
@@ -355,4 +373,4 @@ This is the **Option B** approach — simple and human-controlled for MVP. The s
 - **Dashboard / reporting layer** — What dashboards exist and what queries they run → a design specification
 - **Data retention policies** — How long metadata is kept, archival strategy → an operational document (decision: keep everything for now)
 - **Security & access control** — Who can read/write which tier → a security specification
-- **DCM agent design** — A future agent for schema lifecycle management → post-MVP design document
+- **DCM agent implementation** — CLI code, prompt engineering, integration testing → implementation during build phase
