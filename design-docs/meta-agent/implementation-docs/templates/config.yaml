@@ -1,0 +1,29 @@
+# ============================================================
+# config.yaml — Configuration Specification Template (Blank)
+# ============================================================
+# Externalized configuration, environment parameters, and secrets.
+# Follows the "no hardcoding" rule across environments.
+# ============================================================
+
+configuration:
+  agent_ref: "agent_unique_identifier"
+
+  parameters:                                  # Non-sensitive runtime variables
+    batch_size: 1000
+    timeout_seconds: 300
+
+  environments:                                # Environment-specific URI and system mappings
+    development:
+      source_uri: "s3://dev-bucket/data/"
+      dest_uri: "dev-warehouse.database"
+    staging:
+      source_uri: "s3://staging-bucket/data/"
+      dest_uri: "staging-warehouse.database"
+    production:
+      source_uri: "s3://prod-bucket/data/"
+      dest_uri: "prod-warehouse.database"
+
+  secrets:                                     # Declared secret keys resolved via Secrets Manager
+    - name: "DATABASE_PASSWORD"
+      description: "Password for destination database connection"
+      required: true

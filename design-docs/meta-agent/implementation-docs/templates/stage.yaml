@@ -1,0 +1,52 @@
+# ============================================================
+# stage.yaml — Pipeline Stage Template (Blank)
+# ============================================================
+# Complete specification of one processing stage.
+# The Builder uses this to generate the stage function/node.
+# ============================================================
+
+stage:
+  id: "stage_unique_id"                        # [REQUIRED] Matches pipeline.stages[].stage_id in agent.yaml
+  display_name: "Human Readable Stage Name"    # [REQUIRED]
+  type: "transformation"                       # [REQUIRED] ingestion | validation | transformation | enrichment | publication | gate
+  description: >                               # [REQUIRED] What this stage does (WHAT, not HOW)
+    Plain English description of stage responsibility.
+  autonomy: "autonomous"                       # [REQUIRED] autonomous | human_in_the_loop
+
+input:
+  contract: "input_contract_name"              # [REQUIRED for non-ingest] References contracts/contract_<name>.yaml
+  source:                                      # [OPTIONAL] External connection if ingestion stage
+    system: "s3"                               # s3 | snowflake | kafka | postgres | api
+    connection_ref: "${config.source_uri}"
+    format: "json"                             # csv | json | parquet | avro | relational
+
+output:
+  contract: "output_contract_name"             # [REQUIRED] References contracts/contract_<name>.yaml
+  destination:                                 # [OPTIONAL] External connection if publication stage
+    system: "snowflake"
+    connection_ref: "${config.dest_uri}"
+    format: "relational"
+
+processing:
+  logic_description: >                         # [REQUIRED] Algorithmic description for the Builder
+    Step-by-step description of transformations and calculations.
+  tools:                                       # [OPTIONAL] Tools invoked within this stage
+    - name: "tool_name"
+      purpose: "Why this tool is called"
+  shared_components:                           # [OPTIONAL]
+    - name: "component_name"
+      function: "function_name"
+
+error_handling:
+  strategies:                                  # [REQUIRED]
+    - scenario: "default_error"                # Scenario triggering this handler
+      action: "fail"                           # retry | quarantine | skip | alert | fail
+      max_retries: 3
+      alert_channel: "slack"
+
+governance_hooks:
+  audit:
+    log_inputs: true
+    log_outputs: true
+    metric_collection: true
+  enforcement_points: []                       # Governance rules enforced in this stage

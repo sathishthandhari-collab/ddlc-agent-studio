@@ -1,0 +1,36 @@
+# ============================================================
+# contract.yaml — Data Contract Template (Blank)
+# ============================================================
+# Field-level schema, quality rules, and SLAs for data in transit.
+# The Builder uses this to generate Pydantic models, and the DCM
+# engine compiles it to database DDL / migrations.
+# ============================================================
+
+contract:
+  id: "contract_unique_name"                   # [REQUIRED] Matches contract references in stages
+  display_name: "Human Readable Contract Name" # [REQUIRED]
+  version: "1.0.0"                             # [REQUIRED]
+  description: >                               # [REQUIRED]
+    Description of data shape and purpose at this boundary.
+  direction: "intermediate"                    # [REQUIRED] input | intermediate | output
+
+schema:
+  fields:                                      # [REQUIRED] Field-by-field definitions
+    - name: "field_name"                       # [REQUIRED] Column / attribute identifier
+      type: "string"                           # [REQUIRED] string | integer | float | boolean | timestamp | date | json
+      nullable: false                          # [REQUIRED]
+      description: "Business meaning of field" # [REQUIRED]
+      pii: false                               # [REQUIRED] true if field contains sensitive personal data
+      quality_rules:                           # [OPTIONAL] Assertions evaluated on this field
+        - rule: "regex_match"
+          value: "^[A-Za-z0-9_-]+$"
+          action: "quarantine"                 # fail | quarantine | warn | alert
+
+aggregate_rules:                               # [OPTIONAL] Batch-level quality checks
+  - rule: "min_record_count"
+    value: 1
+    action: "alert"
+
+sla:                                           # [OPTIONAL] Service level agreements
+  freshness: "24h"
+  max_latency: "10m"

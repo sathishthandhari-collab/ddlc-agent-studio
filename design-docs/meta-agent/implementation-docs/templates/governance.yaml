@@ -1,0 +1,39 @@
+# ============================================================
+# governance.yaml — Governance Specification Template (Blank)
+# ============================================================
+# Centralized compliance, PII masking, approval gates, and audit specs.
+# ============================================================
+
+governance:
+  agent_ref: "agent_unique_identifier"
+  classification: "confidential"               # public | internal | confidential | restricted
+
+pii_handling:
+  enabled: false                               # Set true if agent processes PII
+  fields: []                                   # List of PII fields and masking strategies
+  # - field_name: "email"
+  #   contract_ref: "contract_name"
+  #   masking_strategy: "hash"                 # redact | hash | pseudonymize | encrypt
+  #   enforcement_stage: "mask_stage_id"
+
+approval_gates: []                             # Human gates requiring operator intervention
+  # - gate_id: "gate_1"
+  #   stage_id: "stage_id"
+  #   condition: "manual_approval"
+  #   timeout: "24h"
+  #   on_timeout: "escalate"
+
+audit:
+  destination: "metadata_framework"            # Writes to Tier 2 governance_audit
+  log_level: "info"
+  events:
+    - "stage_start"
+    - "stage_complete"
+    - "quality_violation"
+    - "governance_violation"
+    - "error"
+
+compliance_mappings: []                        # Regulatory tracking
+  # - rule_id: "gdpr_article_32"
+  #   description: "Pseudonymisation and encryption of personal data"
+  #   enforced_by: ["mask_stage_id"]

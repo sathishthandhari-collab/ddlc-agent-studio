@@ -1,0 +1,19 @@
+# DDLC Meta-Agent — Architecture Decision Log
+
+## Decision 21: Builder Specialist Split (Deterministic Scaffold Compiler + LLM Leaf Coder)
+
+- **Date**: 2026-11-16
+- **Status**: Approved
+- **Scope**: Builder Specialist (`src/specialists/builder/`), Construction Subgraph (`construct.py`), Generated DDLC Agent Codebase
+- **Context**: 
+  The Builder was previously conceptualized as a monolithic LLM-powered code generator that wrote the entire agent codebase from implementation documents. However, LLM code generation across large codebases is non-deterministic, consumes significant tokens (25k-50k tokens per run), risks syntax/type drift in contract classes, and produces opaque codebases where orchestration wiring and imperative logic are tightly coupled, making 2 AM hotfixes hazardous.
+- **Decision**:
+  Mirror the architectural pivot executed for the DCM Schema Engine (`dcm_agent.md`):
+  1. **Deterministic Scaffold Compiler (Jinja2 + Python AST)**: A zero-LLM compiler that ingests `impl_docs/` (`agent.yaml`, `stages/*.yaml`, `contracts/*.yaml`, `governance.yaml`, `config.yaml`, `tests.yaml`) and deterministically emits the complete read-only orchestration skeleton (`# DO NOT EDIT` header). This includes Pydantic v2 data models, Great Expectations validation suites, DAG topology (`langgraph`, `python_pipeline`, or `streaming`), governance telemetry hooks (Tier 1/Tier 2), and Pydantic configuration loaders.
+  2. **LLM Leaf Coder (Custom Handlers & Unit Tests)**: An isolated LLM specialist invoked only when a stage specifies a bespoke transformation hook (`transform_handler: "handlers/mod.py::func"`). Emits editable, version-controlled Python handlers in `src/handlers/` and targeted pytest suites in `tests/unit/`.
+- **Consequences**:
+  - **Zero Syntax & Wiring Hallucinations**: Orchestration DAG and data contracts are mathematically deterministic.
+  - **Sub-Second Scaffold Generation**: Emits skeleton in <250ms with zero LLM token consumption.
+  - **Safe Production Maintenance ("The 2 AM Rule")**: On-call engineers can hotfix custom business logic in `handlers/` without touching graph wiring, contracts, or governance.
+  - **Surgical Change Requests**: Schema or pipeline modifications re-run only the deterministic compiler, leaving leaf handlers untouched.
+- **Reference**: [`builder.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/builder.md)
