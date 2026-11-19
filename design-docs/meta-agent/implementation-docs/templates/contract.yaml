@@ -7,30 +7,37 @@
 # ============================================================
 
 contract:
-  id: "contract_unique_name"                   # [REQUIRED] Matches contract references in stages
-  display_name: "Human Readable Contract Name" # [REQUIRED]
+  name: "contract_unique_name"                 # [REQUIRED] Matches contract references in stages (input/output)
   version: "1.0.0"                             # [REQUIRED]
   description: >                               # [REQUIRED]
     Description of data shape and purpose at this boundary.
-  direction: "intermediate"                    # [REQUIRED] input | intermediate | output
+  direction: "internal"                        # [REQUIRED] input | internal | output
+  owner: "data-engineering-team"               # [OPTIONAL]
 
-schema:
+  # --- Field Definitions --------------------------------------
   fields:                                      # [REQUIRED] Field-by-field definitions
     - name: "field_name"                       # [REQUIRED] Column / attribute identifier
-      type: "string"                           # [REQUIRED] string | integer | float | boolean | timestamp | date | json
+      type: "string"                           # [REQUIRED] string | integer | float | decimal | boolean | timestamp | date | json | array | map
       nullable: false                          # [REQUIRED]
       description: "Business meaning of field" # [REQUIRED]
-      pii: false                               # [REQUIRED] true if field contains sensitive personal data
+      pii: false                               # [OPTIONAL] true if field contains sensitive personal data
+      pii_category: "none"                     # [OPTIONAL] email_address | phone_number | ssn | ...
       quality_rules:                           # [OPTIONAL] Assertions evaluated on this field
-        - rule: "regex_match"
-          value: "^[A-Za-z0-9_-]+$"
-          action: "quarantine"                 # fail | quarantine | warn | alert
+        - rule: regex                          # regex | range | not_empty | allowed_values | freshness | uniqueness
+          pattern: "^[A-Za-z0-9_-]+$"
+          severity: error                      # error = quarantine/fail | warning = log
+          message: "field_name must match pattern"
 
-aggregate_rules:                               # [OPTIONAL] Batch-level quality checks
-  - rule: "min_record_count"
-    value: 1
-    action: "alert"
+  aggregate_rules:                             # [OPTIONAL] Batch-level quality checks
+    - rule: completeness
+      description: "Completeness check"
+      field: "field_name"
+      threshold: 0.99
+      severity: error
 
-sla:                                           # [OPTIONAL] Service level agreements
-  freshness: "24h"
-  max_latency: "10m"
+  sla:                                         # [OPTIONAL] Service level agreements
+    freshness:
+      max_age_hours: 24
+      description: "Data freshness SLA"
+    availability:
+      uptime_percent: 99.5

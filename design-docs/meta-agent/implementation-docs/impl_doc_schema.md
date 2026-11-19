@@ -90,25 +90,36 @@ governance:
 
 The Builder reads this spec and generates different code depending on the runtime:
 
-**LangGraph Runtime** — becomes a node in a state machine:
+**LangGraph Runtime** — becomes a node in a state machine using Claim Check pointers:
 ```python
 # Generated: stages/validate_quality.py
+from typing import Dict, Any
 from langgraph.graph import StateGraph
 from great_expectations import DataContext
 
-def validate_quality(state: AgentState) -> AgentState:
-    """Validates customer records against quality rules."""
+def validate_quality(state: AgentState) -> Dict[str, Any]:
+    """Validates customer records against quality rules using Claim Check pointer."""
+    in_ptr = state["contracts"]["customer_raw"]
     context = DataContext()
     results = context.run_checkpoint(
         checkpoint_name="customer_raw_quality",
-        batch_request=state.customer_raw_batch
+        batch_request={"uri": in_ptr["uri"]}
     )
-    valid, quarantined = partition_results(results)
-    log_quarantine_audit(quarantined, state.run_id)
-    return state.update(
-        customer_validated=valid,
-        quarantine_count=len(quarantined)
-    )
+    valid_uri, quarantined_uri, valid_count, quarantined_count, sha256 = partition_and_store(results, state["run_id"])
+    log_quarantine_audit(quarantined_uri, quarantined_count, state["run_id"])
+    return {
+        "contracts": {
+            **state["contracts"],
+            "customer_validated": {
+                "contract_id": "customer_validated",
+                "uri": valid_uri,
+                "record_count": valid_count,
+                "payload_sha256": sha256,
+            }
+        },
+        "quarantine_count": quarantined_count,
+        "quality_score": valid_count / (valid_count + quarantined_count) if (valid_count + quarantined_count) > 0 else 0.0,
+    }
 ```
 
 **Python Pipeline Runtime** — becomes a function in a sequential script:
@@ -333,7 +344,28 @@ schedule:
 
 ### 4.2 Stage Documents — `stages/stage_<id>.yaml`
 
-Each stage document fully specifies one pipeline stage. It declares the stage's purpose, its inputs and outputs (as contract references), the tools it uses, how it handles errors, and what governance rules apply to it.
+Each stage document fully specifies one pipeline stage. It declares the stage's purpose, its inputs and outputs (as contract references), custom transformation hooks, the tools it uses, how it handles errors, and what governance rules apply to it.
+
+#### Stage Specification Fields
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `stage.id` | string | Yes | Unique stage identifier. Must match `pipeline.stages[].stage_id` in `agent.yaml`. |
+| `stage.name` | string | Yes | Human-readable stage name for display and logging. |
+| `stage.type` | enum | Yes | Stage category informing code template selection: `ingestion`, `validation`, `transformation`, `enrichment`, `publication`, `governance`, `aggregation`, `notification`. |
+| `stage.description` | string | Yes | Plain English explanation of stage responsibility and business intent. |
+| `stage.autonomy` | enum | Yes | Autonomy level: `autonomous`, `supervised`, `human_required`. |
+| `stage.transform_handler` | string | Optional | Hook path (`"handlers/<mod>.py::<func>"`) dispatching execution to an isolated Python handler function synthesized by the **LLM Leaf Coder**. Used for bespoke imperative logic. |
+| `input.contract` | string | Required* | Reference to input contract in `contracts/`. (*Required for non-ingestion stages). |
+| `input.source` | object | Optional | Source connection details (for ingestion stages). |
+| `output.contract` | string | Required* | Reference to output contract in `contracts/`. (*Required for non-publication stages). |
+| `output.destination` | object | Optional | Destination connection details (for publication stages). |
+| `processing.logic_description` | string | Conditional | Algorithmic, step-by-step description of transformations and rules. **Required** when `transform_handler` is declared; projected directly into the Leaf Coder's prompt. |
+| `processing.tools` | list | Optional | Tools and libraries invoked within this stage. |
+| `processing.shared_components` | list | Optional | Reusable shared components referenced by the stage. |
+| `error_strategy` | object | Yes | Handlers for failure scenarios (`action`: retry, quarantine, skip, fail, warn, alert). |
+| `governance_hooks` | list | Optional | References to governance rules in `governance.yaml` with explicit `enforcement_point`. |
+| `performance` | object | Optional | Operational SLA expectations (`expected_record_count`, `expected_duration_seconds`, `timeout_seconds`). |
 
 ```yaml
 # ============================================================
@@ -580,6 +612,68 @@ stage:
     - rule_id: audit_pii_masking
       enforcement_point: "after_write"
       description: "Log masking operation details to governance_audit"
+
+  performance:
+    expected_record_count:
+      min: 0
+      max: 500000
+    expected_duration_seconds: 60
+    timeout_seconds: 180
+```
+
+**A fourth stage example — bespoke transformation with Leaf Coder hook (`transform_handler` and `processing.logic_description`):**
+
+```yaml
+# ============================================================
+# stages/stage_enrich.yaml — Custom Enrichment Stage Specification
+# ============================================================
+# Specifies custom imperative transformation logic. Because this stage
+# declares a transform_handler and processing.logic_description, the
+# Builder's Deterministic Scaffold Compiler emits the graph wiring and
+# invokes the LLM Leaf Coder to synthesize the editable handler in
+# src/handlers/enrich_customer.py and unit tests in tests/unit/.
+# ============================================================
+
+stage:
+  id: enrich
+  name: "Enrich Customer Tier"
+  type: transformation
+  transform_handler: "handlers/enrich_customer.py::compute_tiers"
+  description: >
+    Enriches validated customer records with loyalty tiers and calculate_date.
+    Uses bespoke scoring logic based on credit scores and lifetime spend.
+
+  autonomy: autonomous
+
+  input:
+    contract: customer_validated
+
+  output:
+    contract: customer_enriched
+
+  processing:
+    logic_description: >
+      Calculate loyalty tier based on credit_score and historical purchases:
+      - Tier Platinum: credit_score >= 750 AND lifetime_spend > 10000
+      - Tier Gold: credit_score >= 700 OR lifetime_spend > 5000
+      - Tier Silver: All other active customers
+      Add calculate_date timestamp as current UTC time.
+
+  error_strategy:
+    on_calculation_error:
+      action: quarantine
+      quarantine_destination: "${config.destinations.quarantine.uri}"
+      quarantine_table: "staging.customer_enrichment_errors"
+      log_summary: true
+      proceed_with_valid: true
+    on_missing_fields:
+      action: fail
+      details: "Required credit_score or lifetime_spend missing from validated contract"
+
+  governance_hooks:
+    - rule_id: audit_enrichment_tiers
+      enforcement_point: "after_write"
+      description: "Log enriched tier distribution metrics to governance_audit"
 
   performance:
     expected_record_count:
@@ -1451,7 +1545,7 @@ The Builder selects a generation strategy based on `architecture.runtime` and ma
 |---|---|---|---|
 | **Stage** | A node function registered in the state graph | A function called in sequential `main()` | A message handler class |
 | **Pipeline wiring** (`next`, `on_error`) | Graph edges (fixed and conditional) | Sequential function calls with try/except | Kafka topic routing and error topics |
-| **Contract** | Pydantic model on the graph state | Pydantic model or dataclass for function I/O | Message schema (Avro/Pydantic) |
+| **Contract** | Claim Check pointer (`ContractPointer` in `AgentState`) with Pydantic model validation at stage boundary | Pydantic model or dataclass for function I/O | Message schema (Avro/Pydantic) |
 | **Error handling** (quarantine) | State update with error flag, conditional routing | Function return with error dataframe, logging | Dead-letter topic publishing |
 | **Governance hook** | State machine gate node or decorator on node function | Decorator or explicit call in function body | Middleware interceptor on handler |
 | **Human gate** | LangGraph interrupt node with Chainlit UI | Input prompt / API call with blocking wait | N/A (streaming pipelines rarely have human gates) |
@@ -1486,6 +1580,19 @@ For governance-derived tests, the Builder generates:
 2. **PII verification tests** — verify that masked output contains no unmasked PII patterns
 3. **Audit trail tests** — verify that audit entries are created at enforcement points
 
+### 8.5 Bespoke Logic Generation via Leaf Coder
+
+When processing stages in pipeline order:
+1. **Hook Detection**: The Builder inspects each stage for `stage.transform_handler: "<path>::<func>"` (e.g., `"handlers/enrich_customer.py::compute_tiers"`).
+2. **Deterministic Skeleton Generation**: The Deterministic Scaffold Compiler generates the StateGraph node and wiring, importing the handler dynamically (`from src.handlers.enrich_customer import compute_tiers`).
+3. **State Projection**: The Builder extracts a minimal, laser-focused state projection containing ONLY:
+   - Input contract Pydantic schema (`input.contract`)
+   - Output contract Pydantic schema (`output.contract`)
+   - Stage transformation requirements (`processing.logic_description`)
+   - Declared tools/libraries (`processing.tools`)
+4. **Leaf Coder Synthesis**: The **LLM Leaf Coder** receives this narrow context and synthesizes the isolated, version-controlled handler function (`src/handlers/enrich_customer.py`) and corresponding unit tests (`tests/unit/test_enrich_customer.py`).
+5. **Decoupled Evolution**: Orchestration skeleton and contracts remain strictly immutable (`# DO NOT EDIT`), while custom imperative logic in `src/handlers/` is fully maintainable and editable by human engineers.
+
 ---
 
 ## 9. A Complete Example
@@ -1495,7 +1602,7 @@ The following is a complete implementation document set for the **Customer Data 
 > [!NOTE]
 > The complete schemas for all documents in this example have already been provided inline in Section 4 above. This section confirms the full file list and summarizes the inter-document references for the Customer Data Pipeline, rather than duplicating the YAML. Refer to:
 > - [Section 4.1](#41-agent-manifest--agentyaml) for `agent.yaml`
-> - [Section 4.2](#42-stage-documents--stagesstage_idyaml) for `stages/stage_ingest.yaml`, `stages/stage_validate.yaml`, `stages/stage_mask_pii.yaml`
+> - [Section 4.2](#42-stage-documents--stagesstage_idyaml) for `stages/stage_ingest.yaml`, `stages/stage_validate.yaml`, `stages/stage_mask_pii.yaml`, `stages/stage_enrich.yaml`
 > - [Section 4.3](#43-contract-documents--contractscontract_nameyaml) for `contracts/customer_raw.yaml`, `contracts/customer_validated.yaml`
 > - [Section 4.4](#44-governance-document--governanceyaml) for `governance.yaml`
 > - [Section 4.5](#45-configuration-document--configyaml) for `config.yaml`
@@ -1509,7 +1616,7 @@ customer_data_pipeline/
 │   ├── stage_ingest.yaml               # Ingestion stage (Section 4.2 — first example)
 │   ├── stage_validate.yaml             # Validation stage (Section 4.2 — second example)
 │   ├── stage_mask_pii.yaml             # PII masking stage (Section 4.2 — third example)
-│   ├── stage_enrich.yaml               # Enrichment stage (not shown — follows same pattern)
+│   ├── stage_enrich.yaml               # Enrichment stage with Leaf Coder hook (Section 4.2 — fourth example)
 │   └── stage_publish.yaml              # Publication stage (not shown — follows same pattern)
 ├── contracts/
 │   ├── customer_raw.yaml               # Raw customer contract (Section 4.3 — first example)
@@ -1594,6 +1701,8 @@ An implementation document set must satisfy these rules before the Builder proce
 | Pipeline `next` must reference a valid `stage_id` or be `null` | Stage reference check |
 | PII fields in `governance.yaml` must exist in referenced contracts with `pii: true` | PII declaration consistency |
 | Every stage referenced in governance rules must exist in the pipeline | Stage existence in governance context |
+| `stage.transform_handler` string must conform to `<filepath>::<function_name>` pattern | Hook format validation |
+| `stage.transform_handler` target module must match callable signature against stage contracts | Hook interface integrity |
 
 ### 10.3 Completeness
 
@@ -1603,6 +1712,7 @@ An implementation document set must satisfy these rules before the Builder proce
 | Every PII field must have a masking strategy and masking stage | No unmasked PII |
 | Every contract field must have a `description` | Human readability |
 | Every stage must have at least one error strategy | No unhandled errors |
+| If `transform_handler` is declared, `processing.logic_description` must be present and non-empty | Leaf Coder prompt completeness |
 | Every `${config.*}` reference must resolve in all declared environments | Config completeness per environment |
 | Every required secret must be declared | Secret documentation completeness |
 
@@ -1617,6 +1727,7 @@ The Builder must not need to make design decisions. These rules ensure the impl 
 | Every error strategy has an explicit action — no fallback to "whatever seems right" | Error handling explicitness |
 | Every governance hook has an explicit enforcement point — not "somewhere in the stage" | Enforcement point explicitness |
 | Every shared component reference has a `usage_type` — not "figure it out" | Component usage explicitness |
+| Bespoke transformation stages must explicitly specify either a `transform_handler` or a shared component tool | Transformation logic explicitness |
 | Every configuration reference resolves to a value or a secret — no dangling references | Configuration completeness |
 
 ---
@@ -1640,6 +1751,7 @@ The Builder must not need to make design decisions. These rules ensure the impl 
 | 13 | Masking strategies as named references | Strategy names map to shared component functions | The Builder doesn't need to understand masking algorithms — it generates code that calls `pii_masker.apply("domain_preserving_hash", value)`. The shared component owns the implementation. |
 | 14 | Performance expectations in stage specs | `expected_duration`, `timeout`, `expected_record_count` | Builder generates monitoring, alerting, and timeout code from these. Without them, the Builder would have to guess or skip observability. |
 | 15 | Single source of truth post-build | `impl_docs/` committed to agent Git repo; `spec.yaml` retired | Eliminates dual-spec drift. `spec.yaml` is strictly Day-0 intake. Day-2 enhancements operate directly on `impl_docs/*.yaml` via Git PR or Chainlit, avoiding competing sources of truth. |
+| 16 | Leaf Coder hook fields (`transform_handler`, `processing.logic_description`) | Explicit YAML stage hooks for bespoke imperative logic | Preserves mathematical determinism in orchestration skeleton compilation while allowing isolated LLM synthesis for custom transformation handlers. Handlers remain version-controlled and editable without touching graph wiring. |
 
 ---
 

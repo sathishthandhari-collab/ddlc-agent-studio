@@ -5,7 +5,7 @@
 > **Document Status**: Draft v0.1  
 > **Last Updated**: 2026-11-09  
 > **Audience**: Architecture & Development Team  
-> **Prerequisite**: [01_approach.md](file:///S:/DATA/agents/ddlc/meta-agent/01_approach.md) — read that first
+> **Prerequisite**: [`approach.md`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/approach.md) — read that first
 
 ---
 

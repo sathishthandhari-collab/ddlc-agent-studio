@@ -162,7 +162,7 @@ For every contract file in `contracts/contract_<name>.yaml`, the compiler determ
      - `date` → `datetime.date`
      - `json` → `Dict[str, Any]`
    - Nullability constraints: Optional fields wrap in `Optional[...] = None`.
-   - Quality rules to Pydantic Field constraints (`ge`, `le`, `min_length`, `max_length`, `pattern`).
+   - Quality rules to Pydantic Field constraints (`ge`, `le`, `min_length`, `max_length`, `pattern`) and validators derived from object-based `quality_rules` (e.g., `rule: range` → `ge`/`le`, `rule: regex` → `@field_validator`, `rule: allowed_values` → allowed set validation).
    - Custom field validators for enum/allowed values (`check: field IN ('A', 'B')`).
 
 2. **Great Expectations Test Suite** in `tests/contracts/test_contracts.py`:
@@ -175,29 +175,38 @@ For every contract file in `contracts/contract_<name>.yaml`, the compiler determ
 
 #### Deterministic Contract Generation Example
 
-Given `contracts/customer_validated.yaml`:
+Given `contracts/customer_validated.yaml` (following `impl_doc_schema.md`):
 ```yaml
 contract:
-  id: customer_validated
+  name: customer_validated
   version: "1.0.0"
+  description: "Customer records with validated fields and credit scores."
+  direction: internal
 
-schema:
   fields:
     - name: customer_id
       type: string
       nullable: false
-      rules:
-        - name: format_check
-          rule: "regex:^CUST-[0-9]{8}$"
+      description: "Customer unique ID"
+      quality_rules:
+        - rule: regex
+          pattern: "^CUST-[0-9]{8}$"
+          severity: error
+          message: "customer_id must match pattern CUST-XXXXXXXX"
     - name: email
       type: string
       nullable: false
+      description: "Customer email address"
     - name: credit_score
       type: integer
       nullable: true
-      rules:
-        - name: range_check
-          rule: "between:300,850"
+      description: "Credit rating"
+      quality_rules:
+        - rule: range
+          min: 300
+          max: 850
+          severity: error
+          message: "credit_score must be between 300 and 850"
 ```
 
 The Compiler deterministically outputs `src/models/contracts.py`:
@@ -322,10 +331,10 @@ architecture:
 Designed for stateful agent workflows requiring branching, looping, human approval gates, checkpointer recovery, or tool orchestration.
 
 #### StateGraph Skeleton Wiring
-- **State Definition**: Emits a `TypedDict` or Pydantic `AgentState` containing the accumulating payload, metadata, run identifiers, and error containers.
-- **Node Emission**: Wraps each stage in a node function decorated with `@stage_governance_guard`.
-- **Edge Routing**: Emits deterministic conditional edges (e.g., checking `quality_score >= 0.95` or evaluating routing rules).
-- **Human Approval Gates**: For stages with `autonomy: human_required` or stages declared in `governance.yaml` (`approval_gates`), the compiler inserts LangGraph `interrupt()` calls and checkpointer pause hooks.
+- **State Definition (Claim Check Pattern)**: Implements the **Claim Check Pattern** ([`PAT-01`](file:///s:/DATA/agents/ddlc-agent-studio/agent-architecture-patterns/stage-gated/01-staged-gated-pipeline.md)). Instead of passing raw, multi-megabyte record payloads in memory, `AgentState` passes lightweight `ContractPointer` references (`contract_id`, `uri`, `record_count`, `payload_sha256`). Bulk data remains in staging storage (e.g. PostgreSQL staging tables, S3, or Snowflake), completely eliminating Out-Of-Memory (OOM) risks and Postgres checkpoint bloat.
+- **Node Emission**: Wraps each stage in a node function decorated with `@stage_governance_guard`. Nodes read bulk data from the input contract pointer's URI, invoke isolated business handlers, persist results to the stage output URI, and return updated contract pointers.
+- **Edge Routing**: Emits deterministic conditional edges based on lightweight state attributes (e.g., checking `quality_score >= 0.95`).
+- **Human Approval Gates**: For stages with `autonomy: human_required` or stages declared in `governance.yaml` (`approval_gates`), the compiler inserts LangGraph `interrupt()` calls. The human reviewer inspects the frozen contract pointer (`uri`, `record_count`, and `payload_sha256`), guaranteeing tamper-evident immutability before resuming execution.
 - **Retry Wrappers**: Applies exponential backoff retry policies based on `stage.error_strategy`.
 
 ```python
@@ -338,22 +347,49 @@ from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.postgres import PostgresSaver
 from src.core.governance import stage_governance_guard
 from src.core.config import settings
+from src.core.storage import storage_client  # Standardized I/O connector
+from src.models.contracts import CustomerValidated, CustomerEnriched
 from src.handlers.enrich_customer import compute_tiers  # Leaf hook import
+
+class ContractPointer(TypedDict):
+    """Claim Check pointer representing bulk contract data in external storage."""
+    contract_id: str
+    uri: str               # e.g., "staging.customer_validated" or "s3://..."
+    record_count: int
+    payload_sha256: str    # Enforces PAT-01 immutability & tamper verification across gates
 
 class AgentState(TypedDict):
     run_id: str
-    raw_records: List[Dict[str, Any]]
-    validated_records: List[Dict[str, Any]]
-    enriched_records: List[Dict[str, Any]]
+    contracts: Dict[str, ContractPointer]  # Lightweight pointers: pass pointers, not payloads
     quality_score: float
     error_log: List[Dict[str, Any]]
 
 @stage_governance_guard("enrich_stage")
 def node_enrich_stage(state: AgentState) -> Dict[str, Any]:
-    """Orchestration node delegating to editable muscle handler."""
-    records = state["validated_records"]
-    enriched = [compute_tiers(r) for r in records]
-    return {"enriched_records": enriched}
+    """Orchestration node delegating to editable muscle handler via Claim Check."""
+    in_pointer = state["contracts"]["customer_validated"]
+    
+    # 1. Read batch from staging storage via URI
+    records = storage_client.read_records(in_pointer["uri"], model=CustomerValidated)
+    
+    # 2. Execute isolated muscle logic
+    enriched_records = [compute_tiers(record) for record in records]
+    
+    # 3. Write enriched dataset to stage destination & compute verification hash
+    out_uri = f"staging.customer_enriched_{state['run_id']}"
+    count, sha256 = storage_client.write_records(out_uri, enriched_records, model=CustomerEnriched)
+    
+    return {
+        "contracts": {
+            **state["contracts"],
+            "customer_enriched": ContractPointer(
+                contract_id="customer_enriched",
+                uri=out_uri,
+                record_count=count,
+                payload_sha256=sha256,
+            )
+        }
+    }
 
 def route_quality_gate(state: AgentState) -> str:
     """Deterministic routing edge compiled from stages/stage_validate.yaml."""
@@ -675,7 +711,7 @@ generated-agent/
 Within the Meta-Agent repository itself, the Builder specialist is organized into two distinct subsystems:
 
 ```
-meta-agent/src/specialists/builder/
+src/meta_agent/specialists/builder/
 ├── __init__.py
 ├── specialist.py                       # Top-level Builder entrypoint for Coordinator
 │
@@ -836,6 +872,7 @@ All architectural decisions governing the Builder Specialist are recorded below:
 | **B-5** | **Data Contract Implementation** | Pydantic v2 Models + Great Expectations Suites | Raw dictionaries, dataclasses, or JSONSchema | Pydantic provides runtime validation, serialization, and IDE autocomplete; Great Expectations provides batch-level SLA verification before stage processing. |
 | **B-6** | **Runtime Portability** | Modular strategy templates (`langgraph`, `python_pipeline`, `streaming`) | Single universal runtime | Different DDLC agents have fundamentally different architectures (stateful graph vs. linear ETL vs. stream processor); strategy isolation allows adding new runtimes cleanly. |
 | **B-7** | **Fix Loop Granularity** | Surgical re-prompting of Leaf Coder for handler test failures | Rebuilding the entire agent from scratch | Eliminates wasted computation and avoids accidental regressions in working stages during fix iterations. |
+| **B-8** | **Graph State Management (Claim Check)** | Pass Pointers, Not Bulk Payloads (`ContractPointer` in `AgentState`) | Accumulating raw record dictionaries in LangGraph memory | Passing large batch datasets (up to 500k rows) in memory causes severe OOM crashes and bloats PostgreSQL checkpoints by hundreds of MBs per node. Storing URI pointers, record counts, and SHA-256 hashes enforces PAT-01 immutability and enables sub-millisecond checkpointing. |
 
 ---
 

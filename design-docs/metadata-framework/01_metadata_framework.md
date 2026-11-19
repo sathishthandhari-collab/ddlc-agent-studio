@@ -5,7 +5,7 @@
 > **Document Status**: Draft v0.2  
 > **Last Updated**: 2026-11-11  
 > **Audience**: Architecture & Development Team  
-> **Prerequisite**: [02_architecture.md](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/02_architecture.md) — read that first
+> **Prerequisite**: [`architecture.md`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/architecture.md) — read that first
 
 ---
 
@@ -366,4 +366,4 @@ Non-destructive changes (`CREATE TABLE`, `CREATE INDEX`, `ADD COLUMN`) apply aut
 - **Dashboard / reporting layer** — What dashboards exist and what queries they run → a design specification
 - **Data retention policies** — How long metadata is kept, archival strategy → an operational document (decision: keep everything for now)
 - **Security & access control** — Who can read/write which tier → a security specification
-- **DCM Schema Engine implementation** — SQLGlot AST compiler, Alembic env configuration, and CLI implementation → `src/metadata/schema_engine/`
+- **DCM Schema Engine implementation** — SQLGlot AST compiler, Alembic env configuration, and CLI implementation → `src/dcm/`

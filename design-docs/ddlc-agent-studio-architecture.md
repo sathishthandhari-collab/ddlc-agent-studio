@@ -261,10 +261,10 @@ ddlc-agent-studio/
 │   └── templates/                   # Template contracts for future Tier 3 agent schemas
 │
 ├── design-docs/                     # ARCHITECTURAL DESIGN & BLUEPRINTS
-│   ├── ddlc-agnet-studio-architecture.md  # THIS LIVING OVERALL ARCHITECTURE DOC
+│   ├── ddlc-agent-studio-architecture.md  # THIS LIVING OVERALL ARCHITECTURE DOC
 │   ├── meta-agent/                  # Meta-agent detailed design specifications
-│   │   ├── 01_approach.md           # Core philosophy & state machine rationale
-│   │   ├── 02_architecture.md       # Coordinator-specialist & blackboard blueprint
+│   │   ├── approach.md              # Core philosophy & state machine rationale
+│   │   ├── architecture.md          # Coordinator-specialist & blackboard blueprint
 │   │   └── decision.log             # Major architectural decision log
 │   ├── metadata-framework/          # 3-tier metadata framework specifications
 │   │   ├── 01_metadata_framework.md # Framework architecture, schemas, and queries
@@ -408,7 +408,7 @@ As of today, no individual DDLC agents have been built or finalized. This sectio
 
 | Component / Subsystem | Design Status | Code Status | Source / Documentation |
 |---|---|---|---|
-| **Meta-Agent Architecture** | Approved (v0.4) | In Development | [02_architecture.md](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/02_architecture.md) |
+| **Meta-Agent Architecture** | Approved (v0.4) | In Development | [architecture.md](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/architecture.md) |
 | **Metadata Framework (Tier 1 & 2)** | Approved (v0.2) | Contract Complete | [01_metadata_framework.md](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/metadata-framework/01_metadata_framework.md) |
 | **DCM Schema Engine** | Approved (v0.2) | Compiler Scaffolded | [dcm_agent.md](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/dcm-agent/dcm_agent.md) |
 | **RAG Knowledge Base & Embeddings** | Architecture Defined| Pending Corpus Ingestion | `_shared/knowledge/` |
@@ -464,8 +464,8 @@ As you progress through studio development:
 
 > [!TIP]
 > **Related Documentation Links**:
-> - [Meta-Agent Approach & State Machine Philosophy](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/01_approach.md)
-> - [Meta-Agent Coordinator & Specialist Architecture](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/02_architecture.md)
+> - [Meta-Agent Approach & State Machine Philosophy](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/approach.md)
+> - [Meta-Agent Coordinator & Specialist Architecture](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/architecture.md)
 > - [Unified Three-Tier Metadata Framework](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/metadata-framework/01_metadata_framework.md)
 > - [Tier 1 Metadata Data Dictionary](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/metadata-framework/tier_1_data_dictionary.md)
 > - [DCM Schema Engine Design (Alembic + SQLGlot)](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/dcm-agent/dcm_agent.md)

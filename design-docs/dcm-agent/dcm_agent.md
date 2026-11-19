@@ -292,7 +292,7 @@ Meta-Agent Workflow
 
 ## 8. Folder & Package Structure
 
-The DCM engine is organized as a clean, modular Python package located at `src/metadata/schema_engine/` (with a CLI entrypoint `dcm`):
+The DCM engine is organized as a clean, modular Python package located at `src/dcm/` (with a CLI entrypoint `dcm`):
 
 ```
 ddlc-agent-studio/
@@ -308,21 +308,21 @@ ddlc-agent-studio/
 │       └── 20261114_01_baseline.py
 │
 ├── src/
-│   └── metadata/
-│       ├── schema_engine/                   # DCM Engine Package
-│       │   ├── __init__.py
-│       │   ├── cli.py                       # Typer/Click CLI entry point (`dcm`)
-│       │   ├── compiler.py                  # SQLGlot contract compiler & AST validator
-│       │   ├── migrator.py                  # Alembic runner & diff generator
-│       │   ├── models.py                    # Pydantic schemas for YAML contract format
-│       │   └── safety.py                    # Destructive operation detection & gate logic
-│       │
+│   ├── dcm/                                 # DCM Schema Engine Package (`src/dcm/`)
+│   │   ├── __init__.py
+│   │   ├── cli.py                           # Typer/Click CLI entry point (`dcm`)
+│   │   ├── compiler.py                      # SQLGlot contract compiler & AST validator
+│   │   ├── migrator.py                      # Alembic runner & diff generator
+│   │   ├── models.py                        # Pydantic schemas for YAML contract format
+│   │   └── safety.py                        # Destructive operation detection & gate logic
+│   │
+│   └── metadata/                            # Metadata client modules
 │       ├── catalog.py                       # Operational queries for Tier 2 catalog
 │       ├── lineage.py                       # Lineage tracking queries
 │       └── callbacks.py                     # LangGraph lifecycle logging callbacks
 │
 ├── tests/
-│   └── schema_engine/
+│   └── dcm/                                 # DCM Schema Engine Test Suite
 │       ├── test_compiler.py                 # Tests YAML -> SQLGlot AST -> Postgres DDL
 │       ├── test_migrator.py                 # Tests diff detection against test DB
 │       └── test_safety.py                   # Tests destructive gate detection

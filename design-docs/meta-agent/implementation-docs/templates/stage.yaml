@@ -12,6 +12,7 @@ stage:
   description: >                               # [REQUIRED] What this stage does (WHAT, not HOW)
     Plain English description of stage responsibility.
   autonomy: "autonomous"                       # [REQUIRED] autonomous | human_in_the_loop
+  transform_handler: "handlers/stage_handler.py::process" # [OPTIONAL] Hook for Leaf Coder custom imperative logic (<file>::<func>)
 
 input:
   contract: "input_contract_name"              # [REQUIRED for non-ingest] References contracts/contract_<name>.yaml
@@ -28,7 +29,7 @@ output:
     format: "relational"
 
 processing:
-  logic_description: >                         # [REQUIRED] Algorithmic description for the Builder
+  logic_description: >                         # [REQUIRED if transform_handler set] Algorithmic description for Leaf Coder
     Step-by-step description of transformations and calculations.
   tools:                                       # [OPTIONAL] Tools invoked within this stage
     - name: "tool_name"

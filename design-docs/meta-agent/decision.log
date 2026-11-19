@@ -17,3 +17,21 @@
   - **Safe Production Maintenance ("The 2 AM Rule")**: On-call engineers can hotfix custom business logic in `handlers/` without touching graph wiring, contracts, or governance.
   - **Surgical Change Requests**: Schema or pipeline modifications re-run only the deterministic compiler, leaving leaf handlers untouched.
 - **Reference**: [`builder.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/builder.md)
+
+## Decision 22: Pass Pointers, Not Payloads, in LangGraph Graph State (Claim Check Pattern)
+
+- **Date**: 2026-11-17
+- **Status**: Approved
+- **Scope**: LangGraph Strategy (`src/graph.py`), Generated DDLC Agent State Management, Checkpointer Persistence
+- **Context**: 
+  Earlier designs stored full dataset record lists (`raw_records`, `validated_records`, `enriched_records`) directly inside LangGraph's in-memory `AgentState`. Because implementation documents allow batches up to 500,000 rows, checkpointing multi-megabyte record lists into PostgreSQL via `PostgresSaver` on every node transition caused severe Out-Of-Memory (OOM) crashes, massive database bloat, and seconds of serialization latency per step. Furthermore, mutable in-memory lists failed to guarantee tamper-evident freeze clauses across human approval gates required by `PAT-01` (`01-staged-gated-pipeline.md`).
+- **Decision**:
+  Adopt the **Claim Check Pattern** for LangGraph graph state:
+  1. `AgentState` passes only lightweight `ContractPointer` objects containing `contract_id`, external storage `uri` (staging tables, S3, Snowflake), `record_count`, and a cryptographic `payload_sha256` hash.
+  2. Bulk payloads reside strictly in persistent or staging storage and are accessed by node runners via standard connectors with Pydantic model validation at boundaries.
+  3. Human gates inspect and freeze the immutable `payload_sha256` hash in `governance_audit` / `stage_gate_record`. Downstream nodes verify the checksum prior to consumption, preventing stale resume (FM-06) or silent tampering.
+- **Consequences**:
+  - **Eliminates OOM & Database Bloat**: `AgentState` size is reduced from hundreds of megabytes to <1 KB. Checkpoints take <1 ms.
+  - **Enforces PAT-01 Cryptographic Immutability**: Guarantees byte-level reproducibility and tamper-evident human gates.
+  - **Clean Decoupling**: Orchestrator manages state transitions; database/lakehouse manages bulk data storage.
+- **Reference**: [`builder.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/builder.md), [`01-staged-gated-pipeline.md`](file:///s:/DATA/agents/ddlc-agent-studio/agent-architecture-patterns/stage-gated/01-staged-gated-pipeline.md)
