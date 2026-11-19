@@ -46,7 +46,7 @@ The spec itself is never passed directly to the Builder. By the time constructio
 > This specification template is strictly a **Day-0 bootstrapping intake document**. It exists to take a raw agent concept from human intent through clarification, feasibility research, and architectural design.
 >
 > Once Gate 3 (Implementation Document Review) is approved and the agent is delivered:
-> 1. The multi-file **`impl_docs/` package** (`agent.yaml`, `stages/`, `contracts/`, `governance.yaml`, `config.yaml`, `tests.yaml`) is committed directly into the generated agent's Git repository as the **permanent, authoritative source of truth**.
+> 1. The multi-file **`impl_docs/` package** (`agent.yaml`, `stages/`, `contracts/`, `config.yaml`, `tests.yaml`) is committed directly into the generated agent's Git repository as the **permanent, authoritative source of truth**.
 > 2. **`spec.yaml` is retired** and archived in the metadata framework (Tier 1 artifact registry) as an immutable intake audit record.
 > 3. **Day-2 Maintenance & Enhancements**: Developers make modifications directly to `impl_docs/*.yaml` (via Git Pull Requests or natural language prompts in Chainlit). Developers are **never** asked to maintain `spec.yaml` and `impl_docs/` in parallel.
 
@@ -140,24 +140,24 @@ architecture:
   autonomy_level: ""                # [REQUIRED] How much human oversight does this agent need?
                                     # Valid values:
                                     #   "autonomous"       — runs end-to-end without human intervention
-                                    #   "semi-autonomous"  — runs with human approval at key gates
-                                    #   "supervised"       — requires human approval at every stage
-                                    # Example: "semi-autonomous"
+                                    #   "semi_autonomous"  — runs with human approval at key gates (PAT-01)
+                                    #   "human_required"   — requires human approval before execution
+                                    # Example: "semi_autonomous"
 
   complexity: ""                    # [OPTIONAL] Hint to the Architect about expected complexity.
                                     # Valid values:
                                     #   "simple"   — linear pipeline, few stages, no branching
                                     #   "moderate" — some branching, error recovery, multiple sources
-                                    #   "complex"  — governance gates, conditional routing, multi-source
-                                    #                aggregation, streaming, or real-time requirements
-                                    # If omitted, the Spec Analyst infers from stages and governance.
+                                    #   "complex"  — conditional routing, multi-source aggregation,
+                                    #                streaming, or real-time requirements
+                                    # If omitted, the Spec Analyst infers from stages and contracts.
 
   runtime_preference: ""            # [OPTIONAL] Preferred runtime for the generated agent.
                                     # Valid values:
-                                    #   "langgraph"  — stateful agent with LangGraph state machine
-                                    #   "python"     — simple Python script pipeline
-                                    #   "streaming"  — event-driven streaming processor
-                                    #   "no_preference" — let the Architect decide based on requirements
+                                    #   "langgraph"        — stateful agent with LangGraph state machine (PAT-01)
+                                    #   "python_pipeline"  — linear high-throughput Python pipeline
+                                    #   "streaming"        — event-driven streaming worker (Kafka / PubSub)
+                                    #   "no_preference"    — let the Architect decide based on requirements
                                     # If omitted, defaults to "no_preference".
                                     # The Architect may override this if requirements demand it.
 
@@ -181,14 +181,14 @@ stages:
     type: ""                        # [REQUIRED] Category of work this stage performs.
                                     # Valid values:
                                     #   "ingestion"       — pulls data from external source
-                                    #   "validation"      — checks data quality and applies rules
-                                    #   "transformation"  — reshapes, enriches, or derives data
-                                    #   "governance"      — applies PII masking, access control, audit
+                                    #   "validation"      — checks data quality and applies contract rules
+                                    #   "transformation"  — reshapes, computes, or derives data
+                                    #   "enrichment"      — joins external datasets or calculates business metrics
+                                    #   "publication"     — writes data to destination warehouse or store
                                     #   "aggregation"     — combines data from multiple sources
-                                    #   "publishing"      — writes data to destination system
                                     #   "notification"    — sends alerts or status updates
                                     #   "monitoring"      — observes and reports on data/system state
-                                    #   "custom"          — anything not covered above (describe in detail)
+                                    #   "custom"          — bespoke processing (describe in detail)
 
     description: >                  # [REQUIRED] What this stage does, in plain English.
                                     # Include: purpose, edge cases, expected behavior on failure.
@@ -196,10 +196,10 @@ stages:
       and any important edge cases or business rules.
 
     autonomy: ""                    # [REQUIRED] Stage-level autonomy.
-                                    # Valid values: "autonomous", "human_approval", "automated_check"
+                                    # Valid values: "autonomous", "semi_autonomous", "human_required"
                                     #   "autonomous"      — runs without pause
-                                    #   "human_approval"  — pauses for human review before proceeding
-                                    #   "automated_check" — runs an automated quality gate, no human needed
+                                    #   "semi_autonomous" — pauses for human approval if validation fails
+                                    #   "human_required"  — pauses unconditionally for human approval at a gate
 
     input_contract: ""              # [REQUIRED] Name of the input data contract (defined in the
                                     # contracts section below). Must match a contract id exactly.
@@ -279,23 +279,21 @@ contracts:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# SECTION 5: Governance
+# SECTION 5: Governance & Classification
 # ──────────────────────────────────────────────────────────────────────────────
+# Note on PII & Data Protection: In enterprise environments, analytical warehouses
+# (Snowflake, Databricks) enforce dynamic masking policies at query time via column tags,
+# or data is tokenized at the ingestion gateway before landing. Pipeline-level masking/
+# tokenization (pii_strategy) is only applicable for edge egress to untrusted external
+# endpoints (e.g. third-party APIs); for internal analytical destinations, declare data
+# sensitivity tags on contracts instead.
 governance:
   pii_fields: []                    # [REQUIRED if agent handles personal data, otherwise OPTIONAL]
                                     # List of field names (from any contract) that contain PII.
-                                    # The Documentarian maps each to a masking/handling strategy.
                                     # Example: ["email", "phone_number", "social_security_number"]
 
-  pii_strategy: ""                  # [REQUIRED if pii_fields is non-empty]
-                                    # How PII fields should be handled.
-                                    # Valid values:
-                                    #   "mask"       — replace with masked values (e.g., "j***@e***.com")
-                                    #   "hash"       — one-way hash (irreversible)
-                                    #   "encrypt"    — reversible encryption (requires key management)
-                                    #   "redact"     — remove entirely
-                                    #   "tokenize"   — replace with surrogate tokens
-                                    #   "mixed"      — different strategies per field (detail in description)
+  pii_strategy: ""                  # [REQUIRED only if pii_fields is non-empty AND egressing to untrusted target]
+                                    # Valid values: "mask", "hash", "encrypt", "redact", "tokenize", "none_warehouse_managed"
 
   audit_requirements:               # [OPTIONAL] What audit trail the agent must maintain.
     enabled: false                  # Whether audit logging is required. Default: false.
@@ -357,10 +355,10 @@ infrastructure:
 
   scheduling:                       # [OPTIONAL] When the agent should run.
     type: ""                        # Valid values:
-                                    #   "cron"       — cron-scheduled recurring execution
-                                    #   "event"      — triggered by external event (message, file arrival)
-                                    #   "manual"     — triggered manually by a human
-                                    #   "continuous" — always running (streaming)
+                                    #   "cron"         — cron-scheduled recurring execution
+                                    #   "event_driven" — triggered by external event (message, file arrival)
+                                    #   "manual"       — triggered manually by a human
+                                    #   "continuous"   — always running (streaming)
     schedule: ""                    # Cron expression if type is "cron". Example: "0 6 * * *" (daily 6AM)
     timezone: ""                    # Timezone for the cron schedule. Example: "UTC"
     description: >                  # Additional scheduling context.
@@ -396,9 +394,9 @@ cross_agent:
   shared_components: []             # [OPTIONAL] Existing shared components to reuse.
                                     # The Architect verifies these exist in the component registry.
                                     # Example:
-                                    #   - name: "pii_masker"
-                                    #     version: "2.1.0"
-                                    #     usage: "Use for email and phone masking in the governance stage"
+                                    #   - name: "audit_logger"
+                                    #     version: "1.0.0"
+                                    #     usage: "Audit logging to metadata framework tables"
                                     #   - name: "s3_reader"
                                     #     version: "1.3.0"
                                     #     usage: "Use for ingesting CSV files from S3"
@@ -464,15 +462,14 @@ agent:
   tags: ["etl", "daily", "pii", "warehouse", "batch"]
 
 architecture:
-  autonomy_level: "semi-autonomous"
+  autonomy_level: "semi_autonomous"
   complexity: "moderate"
   runtime_preference: "no_preference"
   description: >
-    The pipeline has four stages with a governance step for PII masking.
-    The publish stage requires human approval in production but can run
-    autonomously in staging. Error handling should quarantine bad records
-    rather than failing the entire batch — we prefer partial loads over
-    no loads.
+    The pipeline has four stages: ingestion, validation, enrichment, and publication.
+    The publish stage requires human approval before warehouse merges (PAT-01).
+    Error handling quarantines bad records rather than failing the entire batch —
+    we prefer partial loads over no loads. Data sensitivity is governed via contract tags.
 
 stages:
   - id: "ingest_from_s3"
@@ -505,7 +502,7 @@ stages:
       the customer_raw contract. Records that fail validation are
       quarantined to a separate table for manual review. The stage
       produces a quality summary with pass/fail counts per rule.
-    autonomy: "automated_check"
+    autonomy: "autonomous"
     input_contract: "customer_raw"
     output_contract: "customer_validated"
     tools: ["great_expectations"]
@@ -515,33 +512,16 @@ stages:
       Below 95%: quarantine failures, send alert, proceed with valid records.
       Below 80%: halt the pipeline and escalate to the data engineering team.
 
-  - id: "mask_pii"
-    type: "governance"
-    description: >
-      Masks PII fields (email, phone_number) before data enters the
-      analytics warehouse. Email is masked to preserve domain
-      (j***@example.com). Phone is masked to show only last 4 digits
-      (***-***-1234). Original values are never written to the warehouse.
-    autonomy: "autonomous"
-    input_contract: "customer_validated"
-    output_contract: "customer_masked"
-    tools: []
-    error_strategy: "fail_fast"
-    description_details: >
-      Uses the shared pii_masker component (v2.1.0) from the component
-      registry. If the component is unavailable, fail — do not proceed
-      with unmasked PII.
-
   - id: "enrich_derived_fields"
-    type: "transformation"
+    type: "enrichment"
     description: >
       Enriches customer records with derived fields: customer_tenure
       (days since signup), lifecycle_stage (new/active/dormant/churned
       based on last_activity_date), and customer_value_tier (based on
-      total_purchases). These derived fields power the marketing
+      lifetime_spend). These derived fields power the marketing
       segmentation engine.
     autonomy: "autonomous"
-    input_contract: "customer_masked"
+    input_contract: "customer_validated"
     output_contract: "customer_enriched"
     tools: ["pandas"]
     error_strategy: "quarantine"
@@ -552,19 +532,17 @@ stages:
         - "dormant": last activity 91-365 days ago
         - "churned": no activity for > 365 days
       Customer value tier logic:
-        - "platinum": total_purchases >= 10000
-        - "gold": total_purchases >= 5000
-        - "silver": total_purchases >= 1000
-        - "bronze": total_purchases < 1000
+        - "platinum": credit_score >= 750 AND lifetime_spend > 10000
+        - "gold": credit_score >= 700 OR lifetime_spend > 5000
+        - "silver": all other active customers
 
   - id: "publish_to_warehouse"
-    type: "publishing"
+    type: "publication"
     description: >
       Writes enriched customer data to the Snowflake analytics warehouse.
       Uses a merge/upsert strategy keyed on customer_id — updates existing
-      records and inserts new ones. Maintains a history table with SCD Type 2
-      tracking for customer_value_tier and lifecycle_stage changes.
-    autonomy: "human_approval"
+      records and inserts new ones. Applies Snowflake column tags from contracts.
+    autonomy: "human_required"
     input_contract: "customer_enriched"
     output_contract: "customer_warehouse"
     tools: ["snowflake-connector-python"]
@@ -639,14 +617,14 @@ contracts:
         type: "string"
         nullable: false
         description: >
-          Customer's primary email address. PII — will be masked before warehouse.
+          Customer's primary email address. PII — classified for platform masking policies.
         quality_rules:
           - "must be a valid email address"
       - name: "phone_number"
         type: "string"
         nullable: true
         description: >
-          Customer's phone number. PII — will be masked before warehouse.
+          Customer's phone number. PII — classified for platform masking policies.
           Not all customers provide a phone number.
         quality_rules: []
       - name: "signup_date"
@@ -745,72 +723,6 @@ contracts:
         nullable: false
         description: >
           Record creation timestamp.
-        quality_rules: []
-
-  - id: "customer_masked"
-    description: >
-      Customer records after PII masking. Email and phone_number fields
-      have been replaced with masked versions. All other fields are
-      unchanged from customer_validated.
-    direction: "internal"
-    fields:
-      - name: "customer_id"
-        type: "string"
-        nullable: false
-        description: >
-          Customer identifier (not PII, unmasked).
-        quality_rules: []
-      - name: "first_name"
-        type: "string"
-        nullable: false
-        description: >
-          Customer first name (not classified as PII for this pipeline).
-        quality_rules: []
-      - name: "last_name"
-        type: "string"
-        nullable: false
-        description: >
-          Customer last name (not classified as PII for this pipeline).
-        quality_rules: []
-      - name: "email_masked"
-        type: "string"
-        nullable: false
-        description: >
-          Masked email. Format: first char + *** + @ + domain.
-          Example: j***@example.com
-        quality_rules:
-          - "must contain exactly one @ character"
-          - "must contain at least one * character"
-      - name: "phone_masked"
-        type: "string"
-        nullable: true
-        description: >
-          Masked phone. Format: ***-***-{last 4 digits}.
-          Example: ***-***-1234. Null if original was null.
-        quality_rules: []
-      - name: "signup_date"
-        type: "date"
-        nullable: false
-        description: >
-          Signup date (unchanged).
-        quality_rules: []
-      - name: "last_activity_date"
-        type: "date"
-        nullable: true
-        description: >
-          Last activity date (unchanged).
-        quality_rules: []
-      - name: "total_purchases"
-        type: "float"
-        nullable: false
-        description: >
-          Lifetime purchase total (unchanged).
-        quality_rules: []
-      - name: "created_at"
-        type: "timestamp"
-        nullable: false
-        description: >
-          Record creation timestamp (unchanged).
         quality_rules: []
 
   - id: "customer_enriched"
@@ -1018,11 +930,10 @@ governance:
     - "GDPR: support data subject deletion requests via customer_id lookup"
   data_classification: "confidential"
   description: >
-    This pipeline handles customer PII. All PII must be masked before
-    reaching the warehouse. The governance stage uses the shared
-    pii_masker component. Audit logs must capture which records were
-    masked and which were quarantined. The publish stage requires
-    human approval in production.
+    This pipeline handles customer PII. PII attributes (email, phone) are
+    tagged on contracts so that Snowflake Dynamic Data Masking policies
+    govern access dynamically. Telemetry is captured via Metadata Framework.
+    The publish stage requires human approval before warehouse merges.
 
 infrastructure:
   sources:
@@ -1075,17 +986,15 @@ cross_agent:
         for audience segmentation. Breaking changes to these fields
         will break segmentation rules.
   shared_components:
-    - name: "pii_masker"
-      version: "2.1.0"
-      usage: >
-        Use for masking email and phone_number fields in the
-        mask_pii stage. Supports domain-preserving email masking
-        and last-N-digits phone masking.
     - name: "s3_reader"
       version: "1.3.0"
       usage: >
         Use for reading CSV files from S3 in the ingest_from_s3 stage.
         Handles multi-file ingestion and schema evolution detection.
+    - name: "audit_logger"
+      version: "1.0.0"
+      usage: >
+        Shared utility for structured application event logging.
   description: >
     This pipeline is the primary source of customer data for the analytics
     warehouse. Two downstream agents depend on its output. Any schema
@@ -1123,14 +1032,14 @@ Comprehensive listing of every field path, its type, required/optional status, v
 | `agent.owner` | string | Yes | Free text | Metadata |
 | `agent.domain` | string | Yes | Enum: customer, finance, product, marketing, operations, supply_chain, hr, compliance, analytics, infrastructure, other | Spec Analyst, Metadata |
 | `agent.tags` | list[string] | No | Free text | Metadata |
-| `architecture.autonomy_level` | string | Yes | Enum: autonomous, semi-autonomous, supervised | Architect |
+| `architecture.autonomy_level` | string | Yes | Enum: autonomous, semi_autonomous, human_required | Architect |
 | `architecture.complexity` | string | No | Enum: simple, moderate, complex | Architect |
-| `architecture.runtime_preference` | string | No | Enum: langgraph, python, streaming, no_preference | Architect |
+| `architecture.runtime_preference` | string | No | Enum: langgraph, python_pipeline, streaming, no_preference | Architect |
 | `architecture.description` | string | No | Free text | Architect |
 | `stages[].id` | string | Yes | Snake_case, unique within stages | All specialists |
-| `stages[].type` | string | Yes | Enum: ingestion, validation, transformation, governance, aggregation, publishing, notification, monitoring, custom | Architect, Documentarian |
+| `stages[].type` | string | Yes | Enum: ingestion, validation, transformation, enrichment, publication, aggregation, notification, monitoring, custom | Architect, Documentarian |
 | `stages[].description` | string | Yes | Free text | Spec Analyst, Documentarian |
-| `stages[].autonomy` | string | Yes | Enum: autonomous, human_approval, automated_check | Architect |
+| `stages[].autonomy` | string | Yes | Enum: autonomous, semi_autonomous, human_required | Architect |
 | `stages[].input_contract` | string | Yes | Must reference a contract id | Spec Analyst (chain validation) |
 | `stages[].output_contract` | string | Yes | Must reference a contract id | Spec Analyst (chain validation) |
 | `stages[].tools` | list[string] | No | Free text (Researcher validates) | Researcher |
@@ -1150,7 +1059,7 @@ Comprehensive listing of every field path, its type, required/optional status, v
 | `contracts[].sla.min_records` | integer | No | Positive integer or null | Documentarian |
 | `contracts[].sla.freshness_hours` | integer | No | Positive integer or null | Documentarian |
 | `governance.pii_fields` | list[string] | Conditional | Field names from contracts | Documentarian, Validator |
-| `governance.pii_strategy` | string | Conditional | Enum: mask, hash, encrypt, redact, tokenize, mixed | Documentarian |
+| `governance.pii_strategy` | string | Conditional | Enum: mask, hash, encrypt, redact, tokenize, none_warehouse_managed | Documentarian |
 | `governance.audit_requirements.enabled` | boolean | No | true/false (default: false) | Documentarian |
 | `governance.audit_requirements.log_level` | string | No | Enum: minimal, standard, comprehensive | Documentarian |
 | `governance.audit_requirements.retention_days` | integer | No | Positive integer or null | Documentarian |
@@ -1168,7 +1077,7 @@ Comprehensive listing of every field path, its type, required/optional status, v
 | `infrastructure.destinations[].connection` | string | Yes | URI pattern (no credentials) | Documentarian, Builder |
 | `infrastructure.destinations[].format` | string | No | Same enum as source format | Researcher, Documentarian |
 | `infrastructure.destinations[].description` | string | No | Free text | Researcher |
-| `infrastructure.scheduling.type` | string | No | Enum: cron, event, manual, continuous | Architect |
+| `infrastructure.scheduling.type` | string | No | Enum: cron, event_driven, manual, continuous | Architect |
 | `infrastructure.scheduling.schedule` | string | No | Cron expression | Documentarian |
 | `infrastructure.scheduling.timezone` | string | No | Timezone string (e.g., "UTC") | Documentarian |
 | `infrastructure.scheduling.description` | string | No | Free text | Spec Analyst |
@@ -1204,7 +1113,7 @@ Schema validation is Pydantic-based. It checks structure, types, required fields
 |---|---|---|
 | Required fields present | `agent.name`, `agent.version`, `agent.description`, `agent.owner`, `agent.domain`, `architecture.autonomy_level`, at least one stage, at least one contract | **Reject** — cannot proceed without these |
 | Field types correct | Strings are strings, lists are lists, integers are integers | **Reject** |
-| Enum values valid | `autonomy_level` ∈ {autonomous, semi-autonomous, supervised}, etc. | **Reject** |
+| Enum values valid | `autonomy_level` ∈ {autonomous, semi_autonomous, human_required}, etc. | **Reject** |
 | Stage ids unique | No two stages share the same `id` | **Reject** |
 | Contract ids unique | No two contracts share the same `id` | **Reject** |
 | Version is semver | `agent.version` matches `\d+\.\d+\.\d+` | **Reject** |
@@ -1229,7 +1138,7 @@ Semantic validation uses LLM reasoning to check logical consistency. These check
 | PII field existence | Every field listed in `governance.pii_fields` must exist in at least one contract | **Reject** — references a non-existent field |
 | Approval gate validity | Every stage listed in `governance.approval_gates` must match a stage id | **Reject** — references a non-existent stage |
 | Tool availability | Tools listed in stages should be recognizable libraries/tools | **Clarify** — ask for clarification on unrecognized tools |
-| Source/destination consistency | Stages of type "ingestion" should have a corresponding source in infrastructure; stages of type "publishing" should have a corresponding destination | **Clarify** — ask if the infrastructure is missing or intentionally omitted |
+| Source/destination consistency | Stages of type "ingestion" should have a corresponding source in infrastructure; stages of type "publication" should have a corresponding destination | **Clarify** — ask if the infrastructure is missing or intentionally omitted |
 | Cross-agent reference validation | Agents listed in `upstream_dependencies` and `downstream_consumers` are checked against the metadata framework's agent registry | **Clarify** — ask if the referenced agent exists or is planned |
 | Shared component existence | Components listed in `cross_agent.shared_components` are checked against the component registry | **Clarify** — ask if the component should be created as new |
 | Governance completeness | If `data_classification` is "confidential" or "restricted", are PII rules defined? Is audit logging enabled? | **Clarify** — surface potential governance gaps |

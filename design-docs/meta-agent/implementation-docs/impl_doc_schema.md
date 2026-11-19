@@ -33,7 +33,7 @@ The **Validator** specialist also consumes them during Phase 7 (Validation), usi
 > **Retiring `spec.yaml` Post-Build**  
 > While the human-authored `spec.yaml` serves as the initial Day-0 bootstrapping intake document, **it is permanently retired once Gate 3 (Impl Doc Review) is approved and the agent is delivered**.
 > 
-> The entire `impl_docs/` package (`agent.yaml`, `stages/`, `contracts/`, `governance.yaml`, `config.yaml`, `tests.yaml`) is committed directly into the generated agent's Git repository.
+> The entire `impl_docs/` package (`agent.yaml`, `stages/`, `contracts/`, `config.yaml`, `tests.yaml`) is committed directly into the generated agent's Git repository.
 > 
 > For all **Day-2 maintenance, bug fixes, and feature enhancements**, `impl_docs/` in Git is the **sole source of truth**. Developers submit changes by:
 > - Directly editing `impl_docs/*.yaml` and opening a Git Pull Request (GitOps workflow), OR
@@ -170,13 +170,12 @@ An implementation document set for a DDLC agent consists of multiple YAML files 
 ├── stages/                       # One file per pipeline stage
 │   ├── stage_ingest.yaml
 │   ├── stage_validate.yaml
-│   └── stage_mask_pii.yaml
+│   └── stage_enrich.yaml
 ├── contracts/                    # One file per data contract
 │   ├── customer_raw.yaml
 │   └── customer_validated.yaml
-├── governance.yaml               # All governance rules and enforcement points
 ├── config.yaml                   # All externalized configuration
-└── tests.yaml                    # Test cases derived from contracts and governance
+└── tests.yaml                    # Test cases derived from contracts & quality rules
 ```
 
 ### Why Multiple Files Instead of One
@@ -184,29 +183,27 @@ An implementation document set for a DDLC agent consists of multiple YAML files 
 | Concern | Why Separate Files |
 |---|---|
 | **Cognitive load** | A reviewer can open `stages/stage_validate.yaml` and understand the validation stage without scrolling through 500 lines of other content |
-| **Change isolation** | When a contract changes, only its file and referencing stages change. The governance file may not need updating. |
+| **Change isolation** | When a contract changes, only its file and referencing stages change. Other documents do not need updating. |
 | **Builder efficiency** | The Builder can generate code file-by-file, processing one stage at a time, keeping its context window focused |
-| **Cross-document referencing** | Stages reference contracts by name. Governance rules reference stages by ID. The graph of references is explicit and auditable. |
+| **Cross-document referencing** | Stages reference contracts by name. The graph of references is explicit and auditable. |
 | **Version control** | Git diffs show exactly which document changed and why. A contract change is clearly visible. |
 
 ### Document Inventory
 
 | Document | Count | Responsibility |
 |---|---|---|
-| `agent.yaml` | Exactly 1 | Top-level agent identity, runtime, architecture pattern, shared component declarations |
-| `stages/stage_<id>.yaml` | 1 per stage | Full specification of one pipeline stage — inputs, outputs, tools, error handling, governance hooks |
-| `contracts/contract_<name>.yaml` | 1 per data contract | Field-level schema, quality rules per field, SLA definitions |
-| `governance.yaml` | Exactly 1 | All governance rules, PII handling, audit requirements, human gate specs, compliance mappings |
+| `agent.yaml` | Exactly 1 | Top-level agent identity, runtime, architecture pattern, pipeline topology, and shared component declarations |
+| `stages/stage_<id>.yaml` | 1 per stage | Full specification of one pipeline stage — inputs, outputs, tools, error handling, quality gates, and leaf handlers |
+| `contracts/<name>.yaml` | 1 per data contract | Field-level schema, quality rules per field, SLA definitions, data classification tags |
 | `config.yaml` | Exactly 1 | All externalized configuration, environment overrides, secret references |
-| `tests.yaml` | Exactly 1 | Test cases auto-derivable from contracts and governance, plus custom test cases |
+| `tests.yaml` | Exactly 1 | Test cases auto-derivable from contracts and quality rules, plus custom integration test cases |
 
 > [!TIP]
 > **Blank Starter Templates Available**  
-> Clean, unpopulated starter templates for all six documents are located in [`templates/`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/implementation-docs/templates):
+> Clean, unpopulated starter templates for all five documents are located in [`templates/`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/implementation-docs/templates):
 > - [`templates/agent.yaml`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/implementation-docs/templates/agent.yaml)
 > - [`templates/stage.yaml`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/implementation-docs/templates/stage.yaml)
 > - [`templates/contract.yaml`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/implementation-docs/templates/contract.yaml)
-> - [`templates/governance.yaml`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/implementation-docs/templates/governance.yaml)
 > - [`templates/config.yaml`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/implementation-docs/templates/config.yaml)
 > - [`templates/tests.yaml`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/implementation-docs/templates/tests.yaml)
 
@@ -253,12 +250,11 @@ agent:
 architecture:
   pattern: "stateful_pipeline_with_gates"      # Pattern from the catalog. See architecture.md Section 7.1.
                                                # Valid patterns: simple_pipeline, stateful_pipeline_with_gates,
-                                               # batch_processor, streaming_processor, multi_source_aggregator,
-                                               # governance_heavy_pipeline
+                                               # batch_processor, streaming_processor, multi_source_aggregator
   runtime: "langgraph"                         # The runtime the Builder uses to select its generation strategy.
                                                # Valid runtimes: langgraph, python_pipeline, streaming
   autonomy_level: "semi_autonomous"            # How much the agent can do without human intervention.
-                                               # Valid levels: fully_autonomous, semi_autonomous, human_in_the_loop
+                                               # Valid levels: autonomous, semi_autonomous, human_required
 
 # --- Stage Ordering -------------------------------------------
 # Declares the pipeline topology. The Builder uses this to wire
@@ -269,10 +265,8 @@ pipeline:
     - stage_id: ingest                         # References stages/stage_ingest.yaml
       next: validate                           # Linear flow: ingest → validate
     - stage_id: validate
-      next: mask_pii
-      on_error: quarantine_handler             # Conditional routing on validation failure
-    - stage_id: mask_pii
       next: enrich
+      on_error: quarantine_handler             # Conditional routing on validation failure
     - stage_id: enrich
       next: publish
     - stage_id: publish
@@ -297,16 +291,16 @@ dependencies:
       used_by: [publish]
       description: "Snowflake warehouse connector for publishing"
   shared_components:                           # Components from the shared component catalog
-    - component_id: "pii_masker_v2"            # References component_registry in Tier 2 metadata
-      version: "2.1.0"
-      used_by: [mask_pii]
+    - component_id: "s3_reader_v1"             # References component_registry in Tier 2 metadata
+      version: "1.3.0"
+      used_by: [ingest]
       usage_type: "import"                     # import (use as-is), extend (subclass), wrap (adapter)
-      description: "Shared PII masking component — email, phone, SSN strategies"
+      description: "Shared S3 ingestion component — multi-file and partition detection"
     - component_id: "audit_logger_v1"
       version: "1.0.0"
-      used_by: [validate, mask_pii, publish]
+      used_by: [validate, enrich, publish]
       usage_type: "import"
-      description: "Shared audit logging component — writes to governance_audit table"
+      description: "Shared audit logging component — writes to metadata framework tables"
 
 # --- Metadata Integration -------------------------------------
 # Declares which metadata framework tiers and tables this agent
@@ -344,28 +338,116 @@ schedule:
 
 ### 4.2 Stage Documents — `stages/stage_<id>.yaml`
 
-Each stage document fully specifies one pipeline stage. It declares the stage's purpose, its inputs and outputs (as contract references), custom transformation hooks, the tools it uses, how it handles errors, and what governance rules apply to it.
+Each stage document fully specifies one pipeline stage. It declares the stage's purpose, its inputs and outputs (as contract references), custom transformation hooks, tools, error handling strategies, and performance SLAs.
 
-#### Stage Specification Fields
+#### Canonical Pydantic Schema (`StageDocument`)
+
+To guarantee mathematical determinism between the Documentarian, Parser, and Compiler, stage specifications adhere to the following top-level Pydantic schema:
+
+```python
+from typing import Any, Dict, List, Literal, Optional
+from pydantic import BaseModel, Field
+
+class StageHeader(BaseModel):
+    id: str = Field(..., description="Unique stage identifier matching pipeline.stages[].stage_id")
+    name: str = Field(..., description="Human-readable display name for logging and telemetry")
+    type: Literal["ingestion", "validation", "transformation", "enrichment", "publication", "aggregation", "notification", "custom"]
+    description: str = Field(..., description="Plain English description of stage responsibility")
+    autonomy: Literal["autonomous", "semi_autonomous", "human_required"] = "autonomous"
+    transform_handler: Optional[str] = Field(None, description="Hook for Leaf Coder custom imperative logic: handlers/<mod>.py::<func>")
+
+class StageInput(BaseModel):
+    contract: Optional[str] = Field(None, description="Input contract reference in contracts/<name>.yaml")
+    source: Optional[Dict[str, Any]] = Field(None, description="Source connection details (ingestion stages)")
+
+class StageOutput(BaseModel):
+    contract: Optional[str] = Field(None, description="Output contract reference in contracts/<name>.yaml")
+    destination: Optional[Dict[str, Any]] = Field(None, description="Destination connection details (publication stages)")
+
+class ToolConfig(BaseModel):
+    name: str
+    purpose: str
+    configuration: Optional[Dict[str, Any]] = Field(default_factory=dict)
+
+class SharedComponentUsage(BaseModel):
+    name: str
+    usage_type: Literal["import", "extend", "wrap"] = "import"
+    configuration: Optional[Dict[str, Any]] = Field(default_factory=dict)
+
+class StageProcessing(BaseModel):
+    execution_mode: Literal["batch", "chunked", "row"] = Field(
+        default="batch", 
+        description="Execution paradigm: 'batch' (vectorized Polars/Pandas DataFrame), 'chunked' (bounded streaming generator), 'row' (single-record Pydantic)"
+    )
+    dataframe_engine: Optional[Literal["polars", "pandas"]] = Field(
+        default="polars", 
+        description="Vectorized DataFrame engine when execution_mode is 'batch'"
+    )
+    chunk_size: Optional[int] = Field(
+        default=None, 
+        description="Maximum record batch size in memory when execution_mode is 'chunked' (e.g. 10000)"
+    )
+    logic_description: Optional[str] = Field(None, description="Algorithmic description projected directly into Leaf Coder prompt")
+    tools: List[ToolConfig] = Field(default_factory=list)
+    shared_components: List[SharedComponentUsage] = Field(default_factory=list)
+
+class ErrorScenario(BaseModel):
+    action: Literal["retry", "quarantine", "skip", "fail", "warn", "alert"]
+    max_retries: Optional[int] = 3
+    retry_delay_seconds: Optional[int] = 60
+    escalation: Optional[str] = "fail"
+    quarantine_destination: Optional[str] = None
+    quarantine_table: Optional[str] = None
+    include_reason_codes: Optional[bool] = False
+    log_summary: Optional[bool] = True
+    proceed_with_valid: Optional[bool] = False
+    log_level: Optional[str] = "INFO"
+    details: Optional[str] = None
+
+class StagePerformance(BaseModel):
+    expected_record_count: Optional[Dict[str, Any]] = None
+    expected_duration_seconds: Optional[int] = None
+    timeout_seconds: Optional[int] = None
+
+class QualityGate(BaseModel):
+    metric: str
+    threshold: float
+    on_failure: Dict[str, Any]
+
+class StageDocument(BaseModel):
+    """Canonical model for stages/stage_*.yaml validated before compilation."""
+    stage: StageHeader
+    input: StageInput
+    output: StageOutput
+    processing: Optional[StageProcessing] = Field(default_factory=StageProcessing)
+    error_strategy: Dict[str, ErrorScenario]
+    performance: Optional[StagePerformance] = None
+    quality_gate: Optional[QualityGate] = None
+```
+
+#### Stage Specification Fields Reference
 
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `stage.id` | string | Yes | Unique stage identifier. Must match `pipeline.stages[].stage_id` in `agent.yaml`. |
 | `stage.name` | string | Yes | Human-readable stage name for display and logging. |
-| `stage.type` | enum | Yes | Stage category informing code template selection: `ingestion`, `validation`, `transformation`, `enrichment`, `publication`, `governance`, `aggregation`, `notification`. |
+| `stage.type` | enum | Yes | Stage category informing code template selection: `ingestion`, `validation`, `transformation`, `enrichment`, `publication`, `aggregation`, `notification`, `custom`. |
 | `stage.description` | string | Yes | Plain English explanation of stage responsibility and business intent. |
-| `stage.autonomy` | enum | Yes | Autonomy level: `autonomous`, `supervised`, `human_required`. |
+| `stage.autonomy` | enum | Yes | Autonomy level: `autonomous`, `semi_autonomous`, `human_required`. |
 | `stage.transform_handler` | string | Optional | Hook path (`"handlers/<mod>.py::<func>"`) dispatching execution to an isolated Python handler function synthesized by the **LLM Leaf Coder**. Used for bespoke imperative logic. |
 | `input.contract` | string | Required* | Reference to input contract in `contracts/`. (*Required for non-ingestion stages). |
 | `input.source` | object | Optional | Source connection details (for ingestion stages). |
 | `output.contract` | string | Required* | Reference to output contract in `contracts/`. (*Required for non-publication stages). |
 | `output.destination` | object | Optional | Destination connection details (for publication stages). |
+| `processing.execution_mode` | enum | Yes | Execution paradigm: `batch` (vectorized Polars/Pandas DataFrame), `chunked` (bounded memory generator batches), `row` (single Pydantic record; default for streaming). |
+| `processing.dataframe_engine` | enum | Optional | Vectorized DataFrame engine when `execution_mode: batch`. Default: `polars` (Apache Arrow native); fallback: `pandas`. |
+| `processing.chunk_size` | integer | Optional | Maximum memory batch size when `execution_mode: chunked` (e.g., `10000`). Binds peak RAM to $O(\text{chunk\_size})$. |
 | `processing.logic_description` | string | Conditional | Algorithmic, step-by-step description of transformations and rules. **Required** when `transform_handler` is declared; projected directly into the Leaf Coder's prompt. |
 | `processing.tools` | list | Optional | Tools and libraries invoked within this stage. |
 | `processing.shared_components` | list | Optional | Reusable shared components referenced by the stage. |
 | `error_strategy` | object | Yes | Handlers for failure scenarios (`action`: retry, quarantine, skip, fail, warn, alert). |
-| `governance_hooks` | list | Optional | References to governance rules in `governance.yaml` with explicit `enforcement_point`. |
 | `performance` | object | Optional | Operational SLA expectations (`expected_record_count`, `expected_duration_seconds`, `timeout_seconds`). |
+| `quality_gate` | object | Optional | Stage-level gate based on aggregate quality metrics (`metric`, `threshold`, `on_failure`). |
 
 ```yaml
 # ============================================================
@@ -373,7 +455,8 @@ Each stage document fully specifies one pipeline stage. It declares the stage's 
 # ============================================================
 # Fully specifies the ingestion stage of the Customer Data
 # Pipeline. The Builder reads this to generate the stage's
-# code, error handling, and governance hooks.
+# code, telemetry, and error handling.
+# Top-level sections: stage, input, output, processing, error_strategy, performance.
 # ============================================================
 
 stage:
@@ -381,95 +464,74 @@ stage:
   name: "Ingest Customer CSV"                   # Human-readable stage name.
   type: ingestion                               # Stage type category. Informs Builder's code template selection.
                                                 # Valid types: ingestion, validation, transformation, enrichment,
-                                                # publication, governance, aggregation, notification
+                                                # publication, aggregation, notification, custom
   description: >
     Pulls daily CSV files from the S3 raw data bucket.
     Handles schema evolution by detecting new columns and logging
     them as warnings rather than failing. Supports both single-file
     and multi-file ingestion (daily partitioned directories).
     Empty file drops are treated as no-ops with an info log, not errors.
+  autonomy: autonomous                          # autonomous, semi_autonomous, human_required
 
-  # --- Autonomy -----------------------------------------------
-  autonomy: autonomous                          # This stage runs without human intervention.
-                                                # Valid levels: autonomous, supervised, human_required
+input:
+  source:
+    type: "s3"                                # Source system type. Builder generates the appropriate reader.
+    uri: "${config.sources.customer_csv.uri}" # Externalized — references config.yaml. NEVER hardcoded.
+    format: "csv"                             # File format: csv, parquet, json, jsonl, avro
+    options:
+      delimiter: ","
+      header: true
+      encoding: "utf-8"
+      quote_char: '"'
+      null_values: ["", "NULL", "N/A"]
+  contract: customer_raw                      # References contracts/customer_raw.yaml.
 
-  # --- Input Specification ------------------------------------
-  input:
-    source:
-      type: "s3"                                # Source system type. Builder generates the appropriate reader.
-                                                # Valid types: s3, gcs, azure_blob, database, api, kafka, local_file
-      uri: "${config.sources.customer_csv.uri}" # Externalized — references config.yaml. NEVER hardcoded.
-      format: "csv"                             # File format. Valid: csv, parquet, json, jsonl, avro, orc
-      options:                                  # Format-specific read options
-        delimiter: ","
-        header: true
-        encoding: "utf-8"
-        quote_char: '"'
-        null_values: ["", "NULL", "N/A"]
-    contract: customer_raw                      # References contracts/customer_raw.yaml. The input data must
-                                                # conform to this contract AFTER ingestion. Validation happens
-                                                # in the next stage — this contract defines the expected schema.
+output:
+  destination:
+    type: "database"                          # Destination system type.
+    uri: "${config.destinations.staging.uri}" # Externalized connection string
+    table: "staging.customer_raw"             # Target table name
+    write_mode: "append"                      # Valid: append, overwrite, upsert, merge
+  contract: customer_raw                      # Output conforms to customer_raw contract.
 
-  # --- Output Specification -----------------------------------
-  output:
-    destination:
-      type: "database"                          # Destination system type.
-      uri: "${config.destinations.staging.uri}"  # Externalized connection string
-      table: "staging.customer_raw"             # Target table name
-      write_mode: "append"                      # Valid: append, overwrite, upsert, merge
-    contract: customer_raw                      # The output conforms to the same contract as input for this stage.
-
-  # --- Tools --------------------------------------------------
+processing:
   tools:
     - name: "boto3"
       purpose: "Read CSV files from S3 bucket"
-      configuration:                            # Tool-specific config — all values externalized
+      configuration:
         region: "${config.aws.region}"
         assume_role: "${config.aws.s3_read_role_arn}"
 
-  # --- Error Handling -----------------------------------------
-  error_strategy:
-    on_source_unavailable:
-      action: retry                             # Valid actions: retry, fail, skip, quarantine, alert
-      max_retries: 3
-      retry_delay_seconds: 60
-      escalation: fail                          # What happens after retries exhausted
-    on_schema_evolution:
-      action: warn                              # Log new columns, don't fail
-      log_level: "WARNING"
-      details: "New columns detected in source file — logged for review"
-    on_empty_source:
-      action: skip                              # No data is not an error
-      log_level: "INFO"
-      details: "Empty file drop detected — no records to process"
-    on_parse_error:
-      action: quarantine                        # Unparseable rows go to quarantine
-      quarantine_destination: "${config.destinations.quarantine.uri}"
-      quarantine_table: "staging.customer_parse_errors"
-      log_summary: true
+error_strategy:
+  on_source_unavailable:
+    action: retry                             # Valid actions: retry, fail, skip, quarantine, alert
+    max_retries: 3
+    retry_delay_seconds: 60
+    escalation: fail                          # What happens after retries exhausted
+  on_schema_evolution:
+    action: warn                              # Log new columns, don't fail
+    log_level: "WARNING"
+    details: "New columns detected in source file — logged for review"
+  on_empty_source:
+    action: skip                              # No data is not an error
+    log_level: "INFO"
+    details: "Empty file drop detected — no records to process"
+  on_parse_error:
+    action: quarantine                        # Unparseable rows go to quarantine
+    quarantine_destination: "${config.destinations.quarantine.uri}"
+    quarantine_table: "staging.customer_parse_errors"
+    log_summary: true
 
-  # --- Governance Hooks ---------------------------------------
-  # References governance rules defined in governance.yaml.
-  # The Builder generates enforcement code at the specified points.
-  governance_hooks:
-    - rule_id: audit_data_access                # Must exist in governance.yaml
-      enforcement_point: "after_read"           # When in the stage's execution this rule fires
-      description: "Log source access to audit trail after reading from S3"
-    - rule_id: track_record_counts
-      enforcement_point: "after_write"
-      description: "Record input/output row counts for reconciliation"
-
-  # --- Performance Expectations --------------------------------
-  performance:
-    expected_record_count:
-      min: 0                                    # Empty drops are valid
-      max: 500000                               # Alert if exceeds this — possible duplicate drop
-      alert_on_exceed: true
-    expected_duration_seconds: 300               # 5-minute SLA for ingestion
-    timeout_seconds: 600                         # Hard timeout — kill after 10 minutes
+performance:
+  expected_record_count:
+    min: 0                                    # Empty drops are valid
+    max: 500000                               # Alert if exceeds this — possible duplicate drop
+    alert_on_exceed: true
+  expected_duration_seconds: 300               # 5-minute SLA for ingestion
+  timeout_seconds: 600                         # Hard timeout — kill after 10 minutes
 ```
 
-**A second stage example — validation with richer logic:**
+**A second stage example — validation with quality gate and shared audit component:**
 
 ```yaml
 # ============================================================
@@ -487,141 +549,64 @@ stage:
     to the data_quality_summary metadata table. The stage proceeds
     with valid records only — it never blocks the pipeline on
     individual record failures.
-
   autonomy: autonomous
 
-  input:
-    source:
-      type: "database"
-      uri: "${config.destinations.staging.uri}"
-      table: "staging.customer_raw"
-    contract: customer_raw                      # The contract defines the quality rules to check
+input:
+  source:
+    type: "database"
+    uri: "${config.destinations.staging.uri}"
+    table: "staging.customer_raw"
+  contract: customer_raw                      # Contract defining the quality rules to check
 
-  output:
-    destination:
-      type: "database"
-      uri: "${config.destinations.staging.uri}"
-      table: "staging.customer_validated"
-      write_mode: overwrite                     # Each run replaces validated records
-    contract: customer_validated                # Output conforms to a stricter contract
+output:
+  destination:
+    type: "database"
+    uri: "${config.destinations.staging.uri}"
+    table: "staging.customer_validated"
+    write_mode: overwrite                     # Each run replaces validated records
+  contract: customer_validated                # Output conforms to stricter validated contract
 
+processing:
   tools:
     - name: "great_expectations"
       purpose: "Execute data quality validation suite"
       configuration:
         data_context_root: "${config.tools.great_expectations.context_root}"
         checkpoint_name: "customer_raw_quality"
+  shared_components:
+    - name: "audit_logger_v1"
+      usage_type: "import"
 
-  error_strategy:
-    on_validation_failure:
-      action: quarantine
-      quarantine_destination: "${config.destinations.quarantine.uri}"
-      quarantine_table: "staging.customer_quarantine"
-      include_reason_codes: true                # Each quarantined row gets failure details
-      log_summary: true
-      proceed_with_valid: true                  # Pipeline continues with clean data
-    on_tool_error:
-      action: fail
-      details: "Great Expectations runtime failure — cannot validate data"
+error_strategy:
+  on_validation_failure:
+    action: quarantine
+    quarantine_destination: "${config.destinations.quarantine.uri}"
+    quarantine_table: "staging.customer_quarantine"
+    include_reason_codes: true                # Each quarantined row gets failure details
+    log_summary: true
+    proceed_with_valid: true                  # Pipeline continues with clean data
+  on_tool_error:
+    action: fail
+    details: "Great Expectations runtime failure — cannot validate data"
 
-  governance_hooks:
-    - rule_id: audit_quarantined_records
-      enforcement_point: "after_quarantine"
-      description: "Log all quarantined records to governance_audit with reason codes"
-    - rule_id: quality_gate
-      enforcement_point: "after_validation"
-      description: "Check quality score against threshold — fail stage if below minimum"
+performance:
+  expected_record_count:
+    min: 0
+    max: 500000
+  expected_duration_seconds: 120
+  timeout_seconds: 300
 
-  performance:
-    expected_record_count:
-      min: 0
-      max: 500000
-    expected_duration_seconds: 120
-    timeout_seconds: 300
-
-  # --- Quality Gate (stage-level) -----------------------------
-  # A quality gate that determines whether the stage passes.
-  # This is different from per-record validation — this is a
-  # stage-level decision based on aggregate quality metrics.
-  quality_gate:
-    metric: "quality_score"                     # Computed as: valid_records / total_records
-    threshold: 0.95                             # 95% of records must pass validation
-    on_failure:
-      action: fail                              # Fail the stage if quality is below threshold
-      alert: true
-      alert_channel: "${config.alerts.channel}"
+# Stage-level quality gate evaluated against batch metrics
+quality_gate:
+  metric: "quality_score"                     # Computed as: valid_records / total_records
+  threshold: 0.95                             # 95% of records must pass validation
+  on_failure:
+    action: fail                              # Fail the stage if quality is below threshold
+    alert: true
+    alert_channel: "${config.alerts.channel}"
 ```
 
-**A third stage example — PII masking with shared component:**
-
-```yaml
-# ============================================================
-# stages/stage_mask_pii.yaml — PII Masking Stage Specification
-# ============================================================
-
-stage:
-  id: mask_pii
-  name: "Mask PII Fields"
-  type: transformation
-  description: >
-    Applies PII masking to sensitive fields before data
-    moves to the analytics warehouse. Uses the shared
-    pii_masker_v2 component. Masking strategies are field-specific:
-    email gets domain-preserving hashing, phone gets partial redaction,
-    SSN gets full replacement. Original values are never persisted
-    past this stage.
-
-  autonomy: autonomous
-
-  input:
-    source:
-      type: "database"
-      uri: "${config.destinations.staging.uri}"
-      table: "staging.customer_validated"
-    contract: customer_validated
-
-  output:
-    destination:
-      type: "database"
-      uri: "${config.destinations.staging.uri}"
-      table: "staging.customer_masked"
-      write_mode: overwrite
-    contract: customer_masked
-
-  tools:
-    - name: "shared:pii_masker_v2"              # Prefixed with "shared:" to indicate a shared component
-      purpose: "Apply field-level PII masking strategies"
-      configuration:
-        masking_key: "${secrets.pii_masking_key}"    # Secret reference — never a literal value
-        strategies:                                   # Maps fields to masking functions in the shared component
-          email: "domain_preserving_hash"
-          phone: "partial_redact_last_4"
-          ssn: "full_replace_token"
-
-  error_strategy:
-    on_masking_failure:
-      action: fail                              # PII masking failures are NEVER quarantined — they block the pipeline.
-      details: >                                # Unmasked PII must never reach the warehouse.
-        PII masking failed. Pipeline halted to prevent unmasked PII
-        from reaching downstream destinations. Manual intervention required.
-
-  governance_hooks:
-    - rule_id: pii_masking_verification
-      enforcement_point: "after_masking"
-      description: "Verify all PII fields are masked — scan output for unmasked patterns"
-    - rule_id: audit_pii_masking
-      enforcement_point: "after_write"
-      description: "Log masking operation details to governance_audit"
-
-  performance:
-    expected_record_count:
-      min: 0
-      max: 500000
-    expected_duration_seconds: 60
-    timeout_seconds: 180
-```
-
-**A fourth stage example — bespoke transformation with Leaf Coder hook (`transform_handler` and `processing.logic_description`):**
+**A third stage example — bespoke transformation with Leaf Coder hook (`transform_handler` and `processing.logic_description`):**
 
 ```yaml
 # ============================================================
@@ -640,52 +625,48 @@ stage:
   type: transformation
   transform_handler: "handlers/enrich_customer.py::compute_tiers"
   description: >
-    Enriches validated customer records with loyalty tiers and calculate_date.
+    Enriches validated customer records with loyalty tiers and calculation_timestamp.
     Uses bespoke scoring logic based on credit scores and lifetime spend.
-
   autonomy: autonomous
 
-  input:
-    contract: customer_validated
+input:
+  contract: customer_validated
 
-  output:
-    contract: customer_enriched
+output:
+  contract: customer_enriched
 
-  processing:
-    logic_description: >
-      Calculate loyalty tier based on credit_score and historical purchases:
-      - Tier Platinum: credit_score >= 750 AND lifetime_spend > 10000
-      - Tier Gold: credit_score >= 700 OR lifetime_spend > 5000
-      - Tier Silver: All other active customers
-      Add calculate_date timestamp as current UTC time.
+processing:
+  execution_mode: batch
+  dataframe_engine: polars
+  logic_description: >
+    Calculate loyalty tier based on credit_score and historical purchases:
+    - Tier Platinum: credit_score >= 750 AND lifetime_spend > 10000
+    - Tier Gold: credit_score >= 700 OR lifetime_spend > 5000
+    - Tier Silver: All other active customers
+    Add calculation_timestamp as current UTC time.
 
-  error_strategy:
-    on_calculation_error:
-      action: quarantine
-      quarantine_destination: "${config.destinations.quarantine.uri}"
-      quarantine_table: "staging.customer_enrichment_errors"
-      log_summary: true
-      proceed_with_valid: true
-    on_missing_fields:
-      action: fail
-      details: "Required credit_score or lifetime_spend missing from validated contract"
+error_strategy:
+  on_calculation_error:
+    action: quarantine
+    quarantine_destination: "${config.destinations.quarantine.uri}"
+    quarantine_table: "staging.customer_enrichment_errors"
+    log_summary: true
+    proceed_with_valid: true
+  on_missing_fields:
+    action: fail
+    details: "Required credit_score or lifetime_spend missing from validated contract"
 
-  governance_hooks:
-    - rule_id: audit_enrichment_tiers
-      enforcement_point: "after_write"
-      description: "Log enriched tier distribution metrics to governance_audit"
-
-  performance:
-    expected_record_count:
-      min: 0
-      max: 500000
-    expected_duration_seconds: 60
-    timeout_seconds: 180
+performance:
+  expected_record_count:
+    min: 0
+    max: 500000
+  expected_duration_seconds: 60
+  timeout_seconds: 180
 ```
 
 ---
 
-### 4.3 Contract Documents — `contracts/contract_<name>.yaml`
+### 4.3 Contract Documents — `contracts/<name>.yaml`
 
 Contract documents define the exact schema of data flowing between stages. They are the **most critical** documents in the set — every field, every type, every quality rule, every SLA is specified here. The Builder generates Pydantic models, schema validators, and test suites from contracts. The DCM Schema Engine compiles contracts into database DDL.
 
@@ -704,9 +685,11 @@ contract:
   description: >
     Schema definition for raw customer records as ingested from
     daily S3 CSV drops. Represents the data BEFORE validation
-    and PII masking. Fields match the source system's export format.
+    and warehouse publication. Fields match the source system's export format.
   direction: internal                           # Valid: input (external source), output (external sink), internal (between stages)
   owner: "data-engineering-team"
+  classification: "confidential"                # Platform data classification: public, internal, confidential, restricted
+  tags: ["crm", "customer_profile"]
 
   # --- Field Definitions --------------------------------------
   # Every field the contract covers. No field may exist in the data
@@ -774,6 +757,17 @@ contract:
           pattern: "^\\+?[1-9]\\d{1,14}$"
           severity: warning                     # Invalid phone format is a warning, not an error
           message: "phone should match E.164 format"
+
+    - name: lifetime_spend
+      type: float
+      nullable: false
+      default: 0.0
+      description: "Customer total historical spend in USD. Used for customer loyalty tiering."
+      quality_rules:
+        - rule: range
+          min: 0.0
+          severity: error
+          message: "lifetime_spend must be non-negative"
 
     - name: signup_date
       type: date
@@ -866,9 +860,9 @@ contract:
   version: "1.0.0"
   description: >
     Schema for customer records that have passed all quality
-    validation rules. Contains the same fields as customer_raw
-    plus validation metadata. PII fields are still present
-    (masking happens in the next stage).
+    validation rules. Contains the same fields as customer_raw (including
+    lifetime_spend) plus validation metadata. PII fields are retained and
+    classified for downstream warehouse masking policies.
   direction: internal
   owner: "data-engineering-team"
 
@@ -920,165 +914,9 @@ contract:
 
 ---
 
-### 4.4 Governance Document — `governance.yaml`
+### 4.4 Configuration Document — `config.yaml`
 
-The governance document centralizes all governance rules, PII declarations, audit requirements, human gate specifications, and compliance mappings. Every governance hook referenced in stage documents must be defined here.
-
-```yaml
-# ============================================================
-# governance.yaml — Governance Rules and Enforcement
-# ============================================================
-# All governance rules for the Customer Data Pipeline.
-# Each rule declares WHAT must happen and WHERE (which stages).
-# The Builder generates enforcement code at each enforcement point.
-# ============================================================
-
-governance:
-  # --- PII Management -----------------------------------------
-  pii:
-    description: >
-      PII handling policy for the Customer Data Pipeline.
-      All PII fields must be masked before data leaves the staging
-      layer. Original PII values are never persisted in the
-      analytics warehouse or any downstream system.
-    fields:                                     # Master list of all PII fields across all contracts
-      - field_name: email
-        pii_category: email_address
-        contracts: [customer_raw, customer_validated]     # Which contracts contain this PII field
-        masking_strategy: domain_preserving_hash          # How this field is masked
-        masking_stage: mask_pii                           # Which stage performs the masking
-        description: "Email addresses are hashed preserving domain for analytics grouping"
-      - field_name: phone
-        pii_category: phone_number
-        contracts: [customer_raw, customer_validated]
-        masking_strategy: partial_redact_last_4
-        masking_stage: mask_pii
-        description: "Phone numbers have last 4 digits preserved, rest redacted"
-    verification:
-      enabled: true
-      method: "pattern_scan"                    # After masking, scan output for unmasked PII patterns
-      patterns:                                 # Regex patterns that should NOT appear in post-masking output
-        - name: "email_pattern"
-          regex: "[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}"
-        - name: "phone_pattern"
-          regex: "\\+?[1-9]\\d{7,14}"
-      on_detection:
-        action: fail                            # Pipeline MUST fail if unmasked PII detected post-masking
-        alert: true
-        alert_channel: "${config.alerts.pii_channel}"
-
-  # --- Audit Trail Requirements --------------------------------
-  audit:
-    description: >
-      All significant operations are logged to the governance_audit
-      table in the metadata framework (Tier 2). Audit entries are
-      immutable — append-only, never updated or deleted.
-    rules:
-      - rule_id: audit_data_access
-        description: "Log every source data access (reads from external systems)"
-        event_type: "DATA_ACCESS"
-        trigger: "after_read"
-        logged_fields:
-          - source_uri
-          - record_count
-          - timestamp
-          - stage_id
-          - run_id
-        stages: [ingest]                        # Which stages this rule applies to
-
-      - rule_id: audit_quarantined_records
-        description: "Log every quarantined record with reason codes"
-        event_type: "DATA_QUARANTINE"
-        trigger: "after_quarantine"
-        logged_fields:
-          - record_id
-          - quarantine_reason
-          - failed_rules
-          - timestamp
-          - stage_id
-          - run_id
-        stages: [validate]
-
-      - rule_id: audit_pii_masking
-        description: "Log PII masking operations — which fields, which strategy, record count"
-        event_type: "PII_MASKING"
-        trigger: "after_masking"
-        logged_fields:
-          - masked_fields
-          - masking_strategies
-          - record_count
-          - timestamp
-          - stage_id
-          - run_id
-        stages: [mask_pii]
-
-      - rule_id: track_record_counts
-        description: "Log input/output record counts at every stage for reconciliation"
-        event_type: "RECORD_COUNT"
-        trigger: "after_write"
-        logged_fields:
-          - records_in
-          - records_out
-          - records_quarantined
-          - timestamp
-          - stage_id
-          - run_id
-        stages: [ingest, validate, mask_pii, enrich, publish]
-
-  # --- Human Gate Specifications --------------------------------
-  human_gates:
-    description: >
-      Human gates defined for this agent. These are points where
-      the pipeline pauses and waits for human approval before
-      proceeding. Different from the meta-agent's own human gates —
-      these are gates IN the generated agent.
-    gates: []                                   # This agent has no runtime human gates (fully automated pipeline).
-                                                # A governance-heavy agent would declare gates here:
-                                                # - gate_id: approve_pii_masking_config
-                                                #   description: "Require approval before applying new masking strategies"
-                                                #   stage: mask_pii
-                                                #   trigger: "before_execution"
-                                                #   approver_role: "data-governance-team"
-                                                #   timeout_hours: 24
-                                                #   on_timeout: fail
-
-  # --- Quality Gates -------------------------------------------
-  quality_gates:
-    - gate_id: quality_gate
-      description: "Validates that the quality score meets the minimum threshold"
-      stage: validate
-      metric: quality_score
-      threshold: 0.95
-      on_failure:
-        action: fail
-        alert: true
-        alert_channel: "${config.alerts.channel}"
-
-  # --- Compliance Mappings -------------------------------------
-  # Maps regulatory or organizational compliance requirements
-  # to their enforcement points in the pipeline.
-  compliance:
-    - requirement: "GDPR Article 5(1)(f) — Integrity and Confidentiality"
-      description: "Personal data must be processed with appropriate security, including protection against unauthorized processing."
-      enforced_by:
-        - rule_id: pii_masking_verification
-          stage: mask_pii
-        - rule_id: audit_pii_masking
-          stage: mask_pii
-    - requirement: "Internal Policy DP-007 — Data Quality Monitoring"
-      description: "All data pipelines must log quality metrics and maintain a minimum 95% quality score."
-      enforced_by:
-        - rule_id: quality_gate
-          stage: validate
-        - rule_id: track_record_counts
-          stage: validate
-```
-
----
-
-### 4.5 Configuration Document — `config.yaml`
-
-The configuration document declares every externalized value the agent needs. Nothing is hardcoded in stage specifications or governance rules — all values reference entries in this file via `${config.*}` syntax. Environment-specific overrides allow the same impl doc set to deploy across dev, staging, and production.
+The configuration document declares every externalized value the agent needs. Nothing is hardcoded in stage specifications or contracts — all values reference entries in this file via `${config.*}` syntax. Environment-specific overrides allow the same impl doc set to deploy across dev, staging, and production.
 
 ```yaml
 # ============================================================
@@ -1119,7 +957,6 @@ config:
 
     alerts:
       channel: "${secrets.slack_webhook_url}"
-      pii_channel: "${secrets.slack_pii_alert_webhook}"
 
     logging:
       level: "INFO"
@@ -1182,27 +1019,21 @@ config:
     - name: slack_webhook_url
       description: "Slack webhook URL for general alerts"
       required: false
-    - name: slack_pii_alert_webhook
-      description: "Slack webhook URL for PII-specific alerts"
-      required: true
-    - name: pii_masking_key
-      description: "Encryption key used for PII hashing operations"
-      required: true
+
 ```
 
 ---
 
-### 4.6 Test Document — `tests.yaml`
+### 4.5 Test Document — `tests.yaml`
 
-The test document declares test cases that the Builder generates into executable test suites. Tests are derived from contracts (schema validation, quality rules) and governance rules (enforcement verification). The Documentarian may also add custom test cases for edge cases not captured by contracts.
+The test document declares test cases that the Builder generates into executable test suites. Tests are derived from contracts (schema validation, quality rules) and stage integration scenarios.
 
 ```yaml
 # ============================================================
 # tests.yaml — Test Specifications
 # ============================================================
 # Test cases the Builder generates into executable test suites.
-# Organized by source: contract-derived, governance-derived,
-# and custom (manually specified by the Documentarian).
+# Organized by source: contract-derived and custom integration tests.
 # ============================================================
 
 tests:
@@ -1217,14 +1048,14 @@ tests:
         - test_id: "customer_raw_schema_valid"
           type: schema_validation
           description: "Verify all required fields are present with correct types"
-          auto_generate: true                   # Builder generates from contract field definitions
+          auto_generate: true
 
         - test_id: "customer_raw_customer_id_format"
           type: field_quality
           description: "Verify customer_id matches CUS-XXXXXXXX format"
           field: customer_id
           rule: regex
-          auto_generate: true                   # Builder generates from field's quality_rules
+          auto_generate: true
 
         - test_id: "customer_raw_email_format"
           type: field_quality
@@ -1252,37 +1083,6 @@ tests:
           field: quality_score
           rule: range
           auto_generate: true
-
-  # --- Governance-Derived Tests --------------------------------
-  # Tests that verify governance enforcement is working correctly.
-  governance_tests:
-    - test_id: "pii_masking_email"
-      type: governance_enforcement
-      description: "Verify email field is masked in output of mask_pii stage"
-      governance_rule: pii_masking_verification
-      stage: mask_pii
-      assertion: "output must not contain any value matching email regex pattern"
-
-    - test_id: "pii_masking_phone"
-      type: governance_enforcement
-      description: "Verify phone field is masked in output of mask_pii stage"
-      governance_rule: pii_masking_verification
-      stage: mask_pii
-      assertion: "output must not contain any value matching phone regex pattern"
-
-    - test_id: "audit_trail_data_access"
-      type: governance_enforcement
-      description: "Verify audit entry is created when ingest stage reads from S3"
-      governance_rule: audit_data_access
-      stage: ingest
-      assertion: "governance_audit table must contain a DATA_ACCESS entry for this run_id"
-
-    - test_id: "quarantine_audit_logging"
-      type: governance_enforcement
-      description: "Verify quarantined records are logged to governance_audit"
-      governance_rule: audit_quarantined_records
-      stage: validate
-      assertion: "governance_audit table must contain DATA_QUARANTINE entries matching quarantined record count"
 
   # --- Custom Tests -------------------------------------------
   # Edge cases and integration scenarios specified by the Documentarian.
@@ -1326,18 +1126,14 @@ Implementation documents reference each other through a system of named identifi
 | From | To | Reference Field | Example |
 |---|---|---|---|
 | `agent.yaml` → Stage | `stages/stage_<id>.yaml` | `pipeline.stages[].stage_id` | `stage_id: validate` → file `stages/stage_validate.yaml` |
-| `agent.yaml` → Component | Tier 2 `component_registry` | `dependencies.shared_components[].component_id` | `component_id: pii_masker_v2` |
-| Stage → Contract | `contracts/contract_<name>.yaml` | `input.contract`, `output.contract` | `contract: customer_raw` → file `contracts/customer_raw.yaml` |
-| Stage → Governance Rule | `governance.yaml` | `governance_hooks[].rule_id` | `rule_id: audit_data_access` → rule in `governance.yaml` |
+| `agent.yaml` → Component | Tier 2 `component_registry` | `dependencies.shared_components[].component_id` | `component_id: audit_logger_v1` |
+| Stage → Contract | `contracts/<name>.yaml` | `input.contract`, `output.contract` | `contract: customer_raw` → file `contracts/customer_raw.yaml` |
 | Stage → Tool | `agent.yaml` `dependencies.tools` | `tools[].name` | `name: great_expectations` |
 | Stage → Config | `config.yaml` | `${config.<path>}` syntax | `${config.sources.customer_csv.uri}` |
-| Stage → Secret | `config.yaml` `secrets` | `${secrets.<name>}` syntax | `${secrets.pii_masking_key}` |
-| Contract → Contract | `contracts/contract_<name>.yaml` | `extends` | `extends: customer_raw` |
-| Governance → Stage | `stages/stage_<id>.yaml` | `audit.rules[].stages[]` | `stages: [validate]` |
-| Governance → Contract | `contracts/contract_<name>.yaml` | `pii.fields[].contracts[]` | `contracts: [customer_raw, customer_validated]` |
-| Tests → Contract | `contracts/contract_<name>.yaml` | `contract_tests[].contract` | `contract: customer_raw` |
-| Tests → Stage | `stages/stage_<id>.yaml` | `governance_tests[].stage`, `custom_tests[].stage` | `stage: mask_pii` |
-| Tests → Governance Rule | `governance.yaml` | `governance_tests[].governance_rule` | `governance_rule: pii_masking_verification` |
+| Stage → Secret | `config.yaml` `secrets` | `${secrets.<name>}` syntax | `${secrets.staging_db_password}` |
+| Contract → Contract | `contracts/<name>.yaml` | `extends` | `extends: customer_raw` |
+| Tests → Contract | `contracts/<name>.yaml` | `contract_tests[].contract` | `contract: customer_raw` |
+| Tests → Stage | `stages/stage_<id>.yaml` | `custom_tests[].stage` | `stage: validate` |
 
 ### Consistency Rules
 
@@ -1347,21 +1143,15 @@ The Documentarian **must** maintain these invariants. The Builder **assumes** th
 
 2. **Every contract referenced by a stage must have a corresponding contract file.** If a stage declares `input.contract: customer_raw`, then `contracts/customer_raw.yaml` must exist.
 
-3. **Every `governance_hooks[].rule_id` in a stage must be defined in `governance.yaml`.** No orphan references.
+3. **Every `${config.*}` reference in any document must resolve to a path in `config.yaml`.** The Builder does not invent configuration values.
 
-4. **Every `${config.*}` reference in any document must resolve to a path in `config.yaml`.** The Builder does not invent configuration values.
+4. **Every `${secrets.*}` reference must appear in `config.yaml`'s `secrets` list.** This documents the required secrets for operators.
 
-5. **Every `${secrets.*}` reference must appear in `config.yaml`'s `secrets` list.** This documents the required secrets for operators.
+5. **Contract `extends` references must point to an existing contract.** Circular extends chains are forbidden.
 
-6. **Contract `extends` references must point to an existing contract.** Circular extends chains are forbidden.
+6. **Pipeline `next` references must point to valid stage IDs or `null`.** No broken links in the execution chain.
 
-7. **Every PII field declared in `governance.yaml` must exist in the contracts it references.** If governance declares `email` as PII in `customer_raw`, then `customer_raw.yaml` must have a field named `email` with `pii: true`.
-
-8. **Every stage referenced in `governance.yaml`'s rules must exist in the pipeline.** If a rule applies to `stages: [validate]`, then `validate` must be a valid stage ID.
-
-9. **Pipeline `next` references must point to valid stage IDs or `null`.** No broken links in the execution chain.
-
-10. **The `on_error` route in `agent.yaml` must reference a valid stage ID or error handler.** Error routing paths must be resolvable.
+7. **The `on_error` route in `agent.yaml` must reference a valid stage ID or error handler.** Error routing paths must be resolvable.
 
 ---
 
@@ -1457,69 +1247,30 @@ The impl doc contract and the DCM YAML contract are deliberately similar in stru
 
 ---
 
-## 7. Governance Specification Detail
+## 7. Enterprise Governance & Policy Alignment
 
-### 7.1 PII Field Declarations and Masking Strategies
+In modern enterprise data platforms, individual pipeline agents do not invent ad-hoc Python masking routines or regex heuristic scanners. Instead, DDLC agents are **policy consumers** of central enterprise governance (Collibra, Immuta, Snowflake DDM, Databricks Unity Catalog).
 
-Every PII field must be declared at two levels:
+Governance is enforced through three clean, native platform mechanisms:
 
-1. **In the contract** — the field itself is marked `pii: true` with a `pii_category`
-2. **In governance.yaml** — the `pii` section declares the masking strategy and the stage where masking occurs
+### 7.1 Contract Classification & Column Tagging
 
-This dual declaration is intentional. The contract says "this field IS PII." The governance doc says "here is HOW we handle it." The Builder cross-references both to generate masking code and verification code.
+Data sensitivity is declared directly on the data contracts (`contracts/*.yaml`):
+- **Contract Level**: `classification: public | internal | confidential | restricted`
+- **Field Level**: `pii: true`, `pii_category: email_address | phone_number | ssn`, `tags: ["gdpr", "financial"]`
 
-Supported masking strategies:
+When the DCM Schema Engine compiles YAML contracts into physical database DDL, it manages PostgreSQL metadata framework schemas and staging tables. For analytical warehouse destinations (Snowflake, Databricks), the Builder's warehouse connector strategy translates these contract attributes into native database column tags (e.g. Snowflake `WITH TAG (governance.pii = 'email')` or Databricks Unity Catalog tags) during DDL compilation and deployment. This allows central enterprise governance policies to govern data access dynamically without brittle, ad-hoc Python masking inside pipeline code.
 
-| Strategy | Description | When to Use |
-|---|---|---|
-| `domain_preserving_hash` | SHA-256 hash of value, preserving domain (e.g., email domain preserved) | When analytics needs grouping by domain but not individual identity |
-| `partial_redact_last_4` | Keeps last 4 characters, replaces rest with `*` | Phone numbers, SSNs where partial value has analytics utility |
-| `full_replace_token` | Replaces entire value with a deterministic token | SSNs, IDs where no partial value should be visible |
-| `full_redact` | Replaces entire value with `[REDACTED]` | When no value should be visible at all |
-| `date_generalize` | Rounds dates to month or year | Birth dates where approximate age is sufficient |
-| `k_anonymize` | Ensures at least k identical records per quasi-identifier combination | Research datasets with privacy requirements |
+### 7.2 Quality Thresholds & Stage Gates
 
-### 7.2 Audit Trail Requirements
+Operational data quality is enforced deterministically at the pipeline boundaries:
+- **Field & Aggregate Assertions**: Declared in `contracts/*.yaml` and compiled into Great Expectations checkpoints.
+- **Stage Error Routing**: Declared in `stages/*.yaml` via `error_strategy: quarantine | fail | retry`. If a batch fails quality checks, records are quarantined to a staging destination and summary metrics are recorded.
+- **Human Approval Gates**: Declared in `agent.yaml` or `stages/*.yaml` (`autonomy: human_required`). Implements LangGraph `interrupt()` nodes with Claim Check pointers (`PAT-01`), requiring explicit human sign-off before irreversible actions (e.g., publishing to golden analytics tables).
 
-Every audit rule in `governance.yaml` specifies:
+### 7.3 Automated Auditability via Metadata Callbacks
 
-- **What event is logged** (`event_type`) — a category string like `DATA_ACCESS`, `PII_MASKING`, `DATA_QUARANTINE`
-- **When it fires** (`trigger`) — `after_read`, `after_write`, `after_quarantine`, `after_masking`, `before_execution`, `after_execution`
-- **What data is captured** (`logged_fields`) — the specific fields recorded in the `governance_audit` table's `details` JSONB column
-- **Which stages** (`stages[]`) — where this rule is enforced
-
-The Builder generates code at each enforcement point that writes to the `ddlc_shared_metadata.governance_audit` table via the metadata framework's callback hooks.
-
-### 7.3 Human Gate Specifications
-
-Human gates in the generated agent (not the meta-agent's own gates) are declared in `governance.yaml`'s `human_gates` section. Each gate specifies:
-
-| Property | Type | Description |
-|---|---|---|
-| `gate_id` | string | Unique identifier for this gate |
-| `description` | string | What the approver is reviewing |
-| `stage` | string | Which stage this gate precedes or follows |
-| `trigger` | enum | `before_execution` or `after_execution` |
-| `approver_role` | string | Who is authorized to approve |
-| `timeout_hours` | integer | How long to wait before timeout action |
-| `on_timeout` | enum | `fail`, `auto_approve`, `escalate` |
-| `presentation` | object | What information is shown to the approver (fields, summaries, samples) |
-
-### 7.4 Compliance Rule Mappings
-
-The `compliance` section in `governance.yaml` creates traceability from regulatory requirements to enforcement code:
-
-```
-Compliance Requirement → enforced_by → Governance Rule → enforcement_point → Stage → Generated Code
-```
-
-This chain is auditable. An auditor can ask "How does this pipeline comply with GDPR Article 5(1)(f)?" and trace the answer:
-
-1. `compliance[0].requirement` = "GDPR Article 5(1)(f)"
-2. `compliance[0].enforced_by[0]` = rule `pii_masking_verification` in stage `mask_pii`
-3. Stage `mask_pii` has governance hook `pii_masking_verification` at `after_masking`
-4. The Builder generated verification code that scans for unmasked PII patterns
-5. The audit trail has entries proving the verification ran on every execution
+Every pipeline execution, stage transition, data quality summary, and human gate decision is captured automatically and immutably by the Metadata Framework (`01_metadata_framework.md`) via non-invasive LangGraph lifecycle callbacks. Application logic remains 100% clean of manual audit logging calls.
 
 ---
 
@@ -1532,10 +1283,9 @@ The Builder specialist receives the approved implementation documents as its **e
 1. **Read `agent.yaml`** — determine the runtime and generation strategy
 2. **Read `config.yaml`** — understand the configuration surface (for generating config readers)
 3. **Read all contracts** — generate data models (Pydantic, DDL) and validation code
-4. **Read `governance.yaml`** — understand enforcement requirements across all stages
-5. **Read each stage in pipeline order** — generate stage code, wiring, error handling
-6. **Read `tests.yaml`** — generate test suite
-7. **Generate project scaffolding** — directory structure, entry point, requirements
+4. **Read each stage in pipeline order** — generate stage code, wiring, error handling
+5. **Read `tests.yaml`** — generate test suite
+6. **Generate project scaffolding** — directory structure, entry point, requirements
 
 ### 8.2 Generation Strategy Mapping
 
@@ -1547,7 +1297,7 @@ The Builder selects a generation strategy based on `architecture.runtime` and ma
 | **Pipeline wiring** (`next`, `on_error`) | Graph edges (fixed and conditional) | Sequential function calls with try/except | Kafka topic routing and error topics |
 | **Contract** | Claim Check pointer (`ContractPointer` in `AgentState`) with Pydantic model validation at stage boundary | Pydantic model or dataclass for function I/O | Message schema (Avro/Pydantic) |
 | **Error handling** (quarantine) | State update with error flag, conditional routing | Function return with error dataframe, logging | Dead-letter topic publishing |
-| **Governance hook** | State machine gate node or decorator on node function | Decorator or explicit call in function body | Middleware interceptor on handler |
+| **Quality & State Machine Gates** | State machine gate node or Claim Check checkpoint | Validation function check with quarantine return | Middleware interceptor or DLQ router |
 | **Human gate** | LangGraph interrupt node with Chainlit UI | Input prompt / API call with blocking wait | N/A (streaming pipelines rarely have human gates) |
 | **Configuration** | Environment-resolved config dataclass | Config file reader (YAML/env) | Environment variables + config map |
 | **Quality gate** | Conditional edge based on quality metric in state | If-check after validation function | Metric check with circuit breaker |
@@ -1574,11 +1324,11 @@ For every contract, the Builder generates:
 3. **Aggregate quality tests** — one test per `aggregate_rules` entry
 4. **Synthetic data generators** — test fixtures that produce data matching the contract's schema
 
-For governance-derived tests, the Builder generates:
+For pipeline integration and quality gate tests, the Builder generates:
 
-1. **Enforcement verification tests** — verify that governance hooks fire and log correctly
-2. **PII verification tests** — verify that masked output contains no unmasked PII patterns
-3. **Audit trail tests** — verify that audit entries are created at enforcement points
+1. **Gate enforcement tests** — verify that quality gates halt execution or quarantine invalid records when thresholds are breached
+2. **Metadata telemetry tests** — verify that lifecycle callbacks write execution and quality records to metadata framework Tier 1 and Tier 2 tables
+3. **SLA verification tests** — verify that latency and freshness assertions trigger alerts when operational bounds are exceeded
 
 ### 8.5 Bespoke Logic Generation via Leaf Coder
 
@@ -1602,10 +1352,10 @@ The following is a complete implementation document set for the **Customer Data 
 > [!NOTE]
 > The complete schemas for all documents in this example have already been provided inline in Section 4 above. This section confirms the full file list and summarizes the inter-document references for the Customer Data Pipeline, rather than duplicating the YAML. Refer to:
 > - [Section 4.1](#41-agent-manifest--agentyaml) for `agent.yaml`
-> - [Section 4.2](#42-stage-documents--stagesstage_idyaml) for `stages/stage_ingest.yaml`, `stages/stage_validate.yaml`, `stages/stage_mask_pii.yaml`, `stages/stage_enrich.yaml`
-> - [Section 4.3](#43-contract-documents--contractscontract_nameyaml) for `contracts/customer_raw.yaml`, `contracts/customer_validated.yaml`
-> - [Section 4.4](#44-governance-document--governanceyaml) for `governance.yaml`
-> - [Section 4.5](#45-configuration-document--configyaml) for `config.yaml`
+> - [Section 4.2](#42-stage-documents--stagesstage_idyaml) for `stages/stage_ingest.yaml`, `stages/stage_validate.yaml`, `stages/stage_enrich.yaml`
+> - [Section 4.3](#43-contract-documents--contractsnameyaml) for `contracts/customer_raw.yaml`, `contracts/customer_validated.yaml`
+> - [Section 4.4](#44-configuration-document--configyaml) for `config.yaml`
+> - [Section 4.5](#45-test-document--testsyaml) for `tests.yaml`
 
 ### Complete File List
 
@@ -1615,16 +1365,14 @@ customer_data_pipeline/
 ├── stages/
 │   ├── stage_ingest.yaml               # Ingestion stage (Section 4.2 — first example)
 │   ├── stage_validate.yaml             # Validation stage (Section 4.2 — second example)
-│   ├── stage_mask_pii.yaml             # PII masking stage (Section 4.2 — third example)
-│   ├── stage_enrich.yaml               # Enrichment stage with Leaf Coder hook (Section 4.2 — fourth example)
+│   ├── stage_enrich.yaml               # Enrichment stage with Leaf Coder hook (Section 4.2 — third example)
 │   └── stage_publish.yaml              # Publication stage (not shown — follows same pattern)
 ├── contracts/
 │   ├── customer_raw.yaml               # Raw customer contract (Section 4.3 — first example)
 │   ├── customer_validated.yaml         # Validated customer contract (Section 4.3 — second example)
-│   └── customer_masked.yaml            # Masked customer contract (not shown — follows same pattern)
-├── governance.yaml                     # Governance rules (Section 4.4)
-├── config.yaml                         # Configuration (Section 4.5)
-└── tests.yaml                          # Test specifications (Section 4.6)
+│   └── customer_enriched.yaml          # Enriched customer contract (not shown — follows same pattern)
+├── config.yaml                         # Configuration (Section 4.4)
+└── tests.yaml                          # Test specifications (Section 4.5)
 ```
 
 ### Cross-Reference Integrity Map
@@ -1633,42 +1381,27 @@ customer_data_pipeline/
 agent.yaml
   ├── pipeline.stages[0].stage_id: ingest ──────────── stages/stage_ingest.yaml ✓
   ├── pipeline.stages[1].stage_id: validate ────────── stages/stage_validate.yaml ✓
-  ├── pipeline.stages[2].stage_id: mask_pii ────────── stages/stage_mask_pii.yaml ✓
-  ├── pipeline.stages[3].stage_id: enrich ──────────── stages/stage_enrich.yaml ✓
-  ├── pipeline.stages[4].stage_id: publish ─────────── stages/stage_publish.yaml ✓
+  ├── pipeline.stages[2].stage_id: enrich ──────────── stages/stage_enrich.yaml ✓
+  ├── pipeline.stages[3].stage_id: publish ─────────── stages/stage_publish.yaml ✓
   ├── dependencies.tools[0]: great_expectations ────── used_by: [validate] ✓
   ├── dependencies.tools[1]: boto3 ─────────────────── used_by: [ingest] ✓
   ├── dependencies.tools[2]: snowflake-connector ───── used_by: [publish] ✓
-  ├── dependencies.shared_components[0]: pii_masker_v2  used_by: [mask_pii] ✓
-  └── dependencies.shared_components[1]: audit_logger_v1 used_by: [validate, mask_pii, publish] ✓
+  └── dependencies.shared_components[0]: audit_logger_v1 used_by: [validate, enrich, publish] ✓
 
 stages/stage_ingest.yaml
   ├── input.contract: customer_raw ─────────────────── contracts/customer_raw.yaml ✓
   ├── output.contract: customer_raw ────────────────── contracts/customer_raw.yaml ✓
-  ├── governance_hooks[0].rule_id: audit_data_access ── governance.yaml → audit.rules[0] ✓
-  ├── governance_hooks[1].rule_id: track_record_counts  governance.yaml → audit.rules[3] ✓
   └── ${config.sources.customer_csv.uri} ───────────── config.yaml → defaults.sources.customer_csv.uri ✓
 
 stages/stage_validate.yaml
   ├── input.contract: customer_raw ─────────────────── contracts/customer_raw.yaml ✓
   ├── output.contract: customer_validated ──────────── contracts/customer_validated.yaml ✓
-  ├── governance_hooks[0].rule_id: audit_quarantined_records ── governance.yaml → audit.rules[1] ✓
-  └── governance_hooks[1].rule_id: quality_gate ────── governance.yaml → quality_gates[0] ✓
+  └── ${config.destinations.quarantine.uri} ────────── config.yaml → defaults.destinations.quarantine.uri ✓
 
-stages/stage_mask_pii.yaml
+stages/stage_enrich.yaml
   ├── input.contract: customer_validated ───────────── contracts/customer_validated.yaml ✓
-  ├── output.contract: customer_masked ─────────────── contracts/customer_masked.yaml ✓
-  ├── tools[0]: shared:pii_masker_v2 ──────────────── agent.yaml → shared_components[0] ✓
-  ├── governance_hooks[0].rule_id: pii_masking_verification ── governance.yaml → pii.verification ✓
-  └── ${secrets.pii_masking_key} ──────────────────── config.yaml → secrets[8] ✓
-
-governance.yaml
-  ├── pii.fields[0].contracts: [customer_raw, customer_validated] ── ✓ both exist
-  ├── pii.fields[0].masking_stage: mask_pii ──────── stages/stage_mask_pii.yaml ✓
-  ├── audit.rules[0].stages: [ingest] ────────────── stages/stage_ingest.yaml ✓
-  ├── audit.rules[1].stages: [validate] ──────────── stages/stage_validate.yaml ✓
-  ├── audit.rules[2].stages: [mask_pii] ──────────── stages/stage_mask_pii.yaml ✓
-  └── compliance[0].enforced_by → pii_masking_verification → mask_pii ── ✓ chain complete
+  ├── output.contract: customer_enriched ──────────── contracts/customer_enriched.yaml ✓
+  └── stage.transform_handler: handlers/enrich_customer.py::compute_tiers ✓
 ```
 
 ---
@@ -1693,14 +1426,11 @@ An implementation document set must satisfy these rules before the Builder proce
 | Rule | Check |
 |---|---|
 | Every `pipeline.stages[].stage_id` must have a corresponding `stages/stage_<id>.yaml` | File existence per stage |
-| Every `input.contract` and `output.contract` must have a corresponding `contracts/contract_<name>.yaml` | File existence per contract |
-| Every `governance_hooks[].rule_id` must exist in `governance.yaml` | Governance rule lookup |
+| Every `input.contract` and `output.contract` must have a corresponding `contracts/<name>.yaml` | File existence per contract |
 | Every `${config.*}` must resolve in `config.yaml` | Config path resolution |
 | Every `${secrets.*}` must appear in `config.yaml`'s `secrets` list | Secret registration |
 | Contract `extends` must reference an existing contract | Inheritance resolution |
 | Pipeline `next` must reference a valid `stage_id` or be `null` | Stage reference check |
-| PII fields in `governance.yaml` must exist in referenced contracts with `pii: true` | PII declaration consistency |
-| Every stage referenced in governance rules must exist in the pipeline | Stage existence in governance context |
 | `stage.transform_handler` string must conform to `<filepath>::<function_name>` pattern | Hook format validation |
 | `stage.transform_handler` target module must match callable signature against stage contracts | Hook interface integrity |
 
@@ -1708,8 +1438,6 @@ An implementation document set must satisfy these rules before the Builder proce
 
 | Rule | Check |
 |---|---|
-| Every governance rule must have at least one enforcement point | No unenforced rules |
-| Every PII field must have a masking strategy and masking stage | No unmasked PII |
 | Every contract field must have a `description` | Human readability |
 | Every stage must have at least one error strategy | No unhandled errors |
 | If `transform_handler` is declared, `processing.logic_description` must be present and non-empty | Leaf Coder prompt completeness |
@@ -1725,7 +1453,6 @@ The Builder must not need to make design decisions. These rules ensure the impl 
 | Every field has an explicit type — no inferred types | Type explicitness |
 | Every field has an explicit nullable declaration — no defaults | Nullability explicitness |
 | Every error strategy has an explicit action — no fallback to "whatever seems right" | Error handling explicitness |
-| Every governance hook has an explicit enforcement point — not "somewhere in the stage" | Enforcement point explicitness |
 | Every shared component reference has a `usage_type` — not "figure it out" | Component usage explicitness |
 | Bespoke transformation stages must explicitly specify either a `transform_handler` or a shared component tool | Transformation logic explicitness |
 | Every configuration reference resolves to a value or a secret — no dangling references | Configuration completeness |
@@ -1737,21 +1464,22 @@ The Builder must not need to make design decisions. These rules ensure the impl 
 | # | Decision | Choice | Rationale |
 |---|---|---|---|
 | 1 | Document format | Pure YAML with rich `description` fields | Same dual-audience pattern as OpenAPI, dbt, Kubernetes manifests. Machine-parseable structure + human-readable descriptions. No mixed formats. |
-| 2 | Multi-file vs single file | Multiple files per agent | Cognitive load management, change isolation, Builder context efficiency, clean git diffs. Each file has one responsibility. |
+| 2 | Multi-file vs single file | Multiple files per agent (5-document suite) | Cognitive load management, change isolation, Builder context efficiency, clean git diffs. Each file has one responsibility. |
 | 3 | Runtime-agnostic stage specs | Stages specify WHAT, not HOW | The same impl doc works for LangGraph, Python pipeline, and streaming runtimes. Adding a new runtime means adding a Builder strategy, not changing the spec format. |
 | 4 | Contract inheritance (`extends`) | Supported via named reference | Validated contracts add fields to raw contracts. Avoids field duplication across related contracts while maintaining explicit schema. |
 | 5 | Configuration externalization | All values via `${config.*}` and `${secrets.*}` syntax | Nothing hardcoded. Same impl doc set deploys across dev/staging/production via environment overrides. Operators know exactly what secrets to provision. |
-| 6 | PII dual declaration | Marked in contracts (`pii: true`) AND governance (`pii.fields[]`) | Contract says what IS PII. Governance says how to HANDLE PII. Different concerns, both needed for complete generation. |
-| 7 | Governance as centralized doc | Single `governance.yaml` per agent | Governance rules need cross-cutting visibility — rules span stages, compliance mappings span rules. A single file makes this visible and auditable. |
-| 8 | Test derivation | Tests declared in `tests.yaml`, many auto-generated from contracts | Builder generates schema tests, quality rule tests, and governance enforcement tests mechanically. Custom tests cover edge cases contracts can't express. |
+| 6 | Data Sensitivity & Tagging on Contracts | Classification and column tags declared in `contracts/*.yaml` | Contracts define data classification (`confidential`, `restricted`) and semantic tags (`pii`, `phi`). Read by DCM to emit native database column tags for platform dynamic masking. |
+| 7 | Streamlined 5-Document Suite | Retire standalone `governance.yaml` | Governance is an emergent property of contracts, quality gates, and metadata framework callbacks. Eliminates artificial separation and unifies rules with contracts and stages. |
+| 8 | Test derivation | Tests declared in `tests.yaml`, auto-generated from contracts | Builder generates schema tests, quality rule tests, and pipeline integration tests mechanically. Custom tests cover edge cases contracts can't express. |
 | 9 | Quality rules at field AND aggregate level | Both supported | Field rules catch individual bad records. Aggregate rules catch batch-level anomalies (too few records, too many nulls). Both are needed for complete data quality. |
 | 10 | Cross-document references by name | Named string references, not file paths | `contract: customer_raw` is cleaner than `contract: ./contracts/customer_raw.yaml`. The mapping from name to file is a convention the Builder knows. |
 | 11 | `${config.*}` syntax for externalization | Template variable syntax parsed at build/deploy time | Familiar pattern from Docker Compose, Helm, Spring Boot. Builder generates code that reads config; it doesn't inline values. |
 | 12 | Error strategy per-scenario | Multiple error strategies per stage, keyed by scenario | Different error types need different handling. Source unavailable needs retry. Parse errors need quarantine. Tool errors need fail. One-size-fits-all error handling is insufficient. |
-| 13 | Masking strategies as named references | Strategy names map to shared component functions | The Builder doesn't need to understand masking algorithms — it generates code that calls `pii_masker.apply("domain_preserving_hash", value)`. The shared component owns the implementation. |
+| 13 | Platform-Managed Data Protection | Enterprise policy consumer model (Collibra, Snowflake DDM) | Individual pipeline agents consume central governance rather than compiling bespoke regex masking scripts in Python. Tokenization happens at the ingestion edge or dynamic warehouse masking. |
 | 14 | Performance expectations in stage specs | `expected_duration`, `timeout`, `expected_record_count` | Builder generates monitoring, alerting, and timeout code from these. Without them, the Builder would have to guess or skip observability. |
 | 15 | Single source of truth post-build | `impl_docs/` committed to agent Git repo; `spec.yaml` retired | Eliminates dual-spec drift. `spec.yaml` is strictly Day-0 intake. Day-2 enhancements operate directly on `impl_docs/*.yaml` via Git PR or Chainlit, avoiding competing sources of truth. |
 | 16 | Leaf Coder hook fields (`transform_handler`, `processing.logic_description`) | Explicit YAML stage hooks for bespoke imperative logic | Preserves mathematical determinism in orchestration skeleton compilation while allowing isolated LLM synthesis for custom transformation handlers. Handlers remain version-controlled and editable without touching graph wiring. |
+| 17 | Multi-Paradigm Execution Modes (`batch`, `chunked`, `row`) | Declared in `stage.yaml` (`processing.execution_mode`, `dataframe_engine`, `chunk_size`) | Prevents OOM and 500k-row latency bottlenecks. Vectorized DataFrame engines (Polars/Pandas) process bulk records with sub-second latency; chunked generators bind memory to $O(\text{chunk\_size})$ for row-level external calls; single-record mode serves streaming events. |
 
 ---
 
@@ -1763,9 +1491,9 @@ This document defines the **schema and structure** of implementation documents. 
 - **How the Builder generates code from impl docs** — The code templates, generation strategies, and file emission logic. That is defined in `builder.md`.
 - **The spec template** — What fields the user fills in to bootstrap a new DDLC agent. That is defined in [`input-spec-template/spec_template.md`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/input-spec-template/spec_template.md).
 - **The architecture proposal format** — What the Architect produces and the Documentarian reads. That is an architecture detail.
-- **Governance enforcement implementation** — How governance hooks become actual code at runtime. That is defined in `governance.md`.
+- **Enterprise Governance Integration** — How enterprise platforms (Collibra, Immuta, Snowflake DDM) enforce dynamic masking and access policies via DCM-compiled contract tags.
 - **DCM Schema Engine internals** — How YAML contracts compile to DDL. That is defined in [`dcm_agent.md`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/dcm-agent/dcm_agent.md).
-- **Metadata framework table schemas** — The DDL for `governance_audit`, `stage_execution`, etc. That is defined in [`01_metadata_framework.md`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/metadata-framework/01_metadata_framework.md).
+- **Metadata framework table schemas** — The DDL for `stage_execution`, `data_quality_summary`, etc. That is defined in [`01_metadata_framework.md`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/metadata-framework/01_metadata_framework.md).
 - **Prompt engineering** — The actual LLM prompts used by the Documentarian or Builder specialists.
 - **Versioning and migration of impl docs** — How impl docs evolve across agent versions. Deferred to a future operational design document.
 - **Multi-agent impl doc coordination** — How impl docs for agents that depend on each other are kept consistent. Deferred to the change management design.

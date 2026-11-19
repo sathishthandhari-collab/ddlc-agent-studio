@@ -16,9 +16,9 @@ agent:
     - "domain_tag"
 
 architecture:
-  pattern: "stateful_pipeline_with_gates"      # [REQUIRED] Pattern: simple_pipeline | stateful_pipeline_with_gates | batch_processor | streaming_processor | multi_source_aggregator | governance_heavy_pipeline
+  pattern: "stateful_pipeline_with_gates"      # [REQUIRED] Pattern: simple_pipeline | stateful_pipeline_with_gates | batch_processor | streaming_processor | multi_source_aggregator
   runtime: "langgraph"                         # [REQUIRED] Runtime: langgraph | python_pipeline | streaming
-  autonomy_level: "semi_autonomous"            # [REQUIRED] Autonomy: fully_autonomous | semi_autonomous | human_in_the_loop
+  autonomy_level: "semi_autonomous"            # [REQUIRED] Autonomy: autonomous | semi_autonomous | human_required
 
 pipeline:
   stages:                                      # [REQUIRED] Ordered stage topology
@@ -37,5 +37,5 @@ dependencies:
     - name: "shared_component_name"
       version: "1.0.0"
       used_by: ["stage_1_id"]
-      usage_type: "imported"                   # imported | generated_to_shared
+      usage_type: "import"                     # import | extend | wrap
       description: "Component capability"

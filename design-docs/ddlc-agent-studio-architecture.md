@@ -151,7 +151,7 @@ flowchart TD
     G3 -- Revisions --> P5
     G3 -- Approved --> P6[Phase 6: Construction<br/><i>Builder emits code via runtime strategy</i>]
     
-    P6 --> P7[Phase 7: Validation<br/><i>Validator tests contracts, governance, & tests</i>]
+    P6 --> P7[Phase 7: Validation<br/><i>Validator tests contracts, quality rules, & tests</i>]
     P7 --> Q_VAL{Validation<br/>Passed?}
     Q_VAL -- Failed --> G4{{Gate 4: Fix Escalation<br/><i>Fix loop up to N attempts</i>}}
     G4 --> P6
@@ -180,12 +180,12 @@ flowchart TD
 
 ### 3.2 The Enhancement Lifecycle (Iterative Change Flow)
 
-When an existing DDLC agent needs modification (e.g., adding a stage, updating a schema, or changing SLAs), the Meta-Agent enters the **Maintenance Flow**:
+When an existing DDLC agent needs modification (e.g., adding a stage, updating a schema, or changing SLAs), the Meta-Agent enters the **Maintenance Flow**. Following **Decision 20**, `spec.yaml` was retired post-build; developers submit changes by editing `impl_docs/*.yaml` directly (GitOps PR) or describing changes in Chainlit:
 
 ```
                        ┌──────────────────────────────┐
                        │   User Requests Change or    │
-                       │     Edits Existing Spec      │
+                       │   Edits impl_docs/ (PR/UI)   │
                        └──────────────┬───────────────┘
                                       │
                                       ▼
@@ -239,7 +239,7 @@ ddlc-agent-studio/
 ├── .github/                         # CI/CD workflows, GitOps automation
 ├── _shared/                         # ALL SHARED ASSETS (Code Components + RAG Knowledge)
 │   ├── components/                  # Reusable Python Code Modules (Tier 2 Catalog Assets)
-│   │   ├── pii/                     # PII masking & tokenization modules
+│   │   ├── connectors/              # Shared I/O & cloud storage connectors
 │   │   ├── quality/                 # Great Expectations & custom validation rules
 │   │   └── formatters/              # Common schema adapters & serializers
 │   │
@@ -434,10 +434,10 @@ The table below outlines candidate DDLC agents being considered for upcoming dev
 │  invalid rows, and logs quality scores to Tier 2 metadata.                             │
 │  Status: CANDIDATE  •  Target Runtime: LangGraph Staged-Gated (PAT-01)                 │
 │                                                                                        │
-│  [AGT-03] Governance, PII & Compliance Agent                                           │
-│  Scans columns for sensitive data, applies cryptographic hashing or tokenization,      │
-│  records audit events, and enforces retention policies.                                │
-│  Status: CANDIDATE  •  Target Runtime: LangGraph Stateful                              │
+│  [AGT-03] Data Classification & Catalog Sync Agent                                     │
+│  Connects to enterprise governance platforms (Collibra, Unity Catalog, Snowflake tags), │
+│  syncs column sensitivity tags, and audits platform access policy compliance.          │
+│  Status: CANDIDATE  •  Target Runtime: Python CLI / Event                              │
 │                                                                                        │
 │  [AGT-04] Schema Evolution & Migration Agent                                           │
 │  Detects upstream schema drift, alerts on breaking type conversions, and coordinates   │

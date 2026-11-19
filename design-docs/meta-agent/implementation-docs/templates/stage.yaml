@@ -1,53 +1,62 @@
 # ============================================================
 # stage.yaml — Pipeline Stage Template (Blank)
 # ============================================================
-# Complete specification of one processing stage.
-# The Builder uses this to generate the stage function/node.
+# Canonical specification of one processing stage.
+# Top-level sections: stage, input, output, processing, error_strategy, performance.
 # ============================================================
 
 stage:
   id: "stage_unique_id"                        # [REQUIRED] Matches pipeline.stages[].stage_id in agent.yaml
-  display_name: "Human Readable Stage Name"    # [REQUIRED]
-  type: "transformation"                       # [REQUIRED] ingestion | validation | transformation | enrichment | publication | gate
+  name: "Human Readable Stage Name"            # [REQUIRED] Display name for logging & telemetry
+  type: "transformation"                       # [REQUIRED] ingestion | validation | transformation | enrichment | publication | aggregation | notification
   description: >                               # [REQUIRED] What this stage does (WHAT, not HOW)
     Plain English description of stage responsibility.
-  autonomy: "autonomous"                       # [REQUIRED] autonomous | human_in_the_loop
+  autonomy: "autonomous"                       # [REQUIRED] autonomous | semi_autonomous | human_required
   transform_handler: "handlers/stage_handler.py::process" # [OPTIONAL] Hook for Leaf Coder custom imperative logic (<file>::<func>)
 
 input:
-  contract: "input_contract_name"              # [REQUIRED for non-ingest] References contracts/contract_<name>.yaml
+  contract: "input_contract_name"              # [REQUIRED for non-ingest] References contracts/<name>.yaml
   source:                                      # [OPTIONAL] External connection if ingestion stage
-    system: "s3"                               # s3 | snowflake | kafka | postgres | api
-    connection_ref: "${config.source_uri}"
-    format: "json"                             # csv | json | parquet | avro | relational
+    type: "s3"                                 # s3 | gcs | azure_blob | database | api | kafka | local_file
+    uri: "${config.sources.raw_source.uri}"
+    format: "csv"                              # csv | json | parquet | avro | relational
+    options:
+      delimiter: ","
+      header: true
 
 output:
-  contract: "output_contract_name"             # [REQUIRED] References contracts/contract_<name>.yaml
+  contract: "output_contract_name"             # [REQUIRED for non-publication] References contracts/<name>.yaml
   destination:                                 # [OPTIONAL] External connection if publication stage
-    system: "snowflake"
-    connection_ref: "${config.dest_uri}"
-    format: "relational"
+    type: "database"                           # database | snowflake | s3 | kafka
+    uri: "${config.destinations.target.uri}"
+    table: "schema.table_name"
+    write_mode: "append"                       # append | overwrite | upsert | merge
 
 processing:
+  execution_mode: "batch"                      # [REQUIRED] batch (vectorized Polars/Pandas) | chunked (bounded generator) | row (per-message Pydantic)
+  dataframe_engine: "polars"                   # [OPTIONAL] polars (default) | pandas (used when execution_mode is batch)
+  chunk_size: null                             # [OPTIONAL] Integer (e.g. 10000) when execution_mode is chunked
   logic_description: >                         # [REQUIRED if transform_handler set] Algorithmic description for Leaf Coder
     Step-by-step description of transformations and calculations.
   tools:                                       # [OPTIONAL] Tools invoked within this stage
     - name: "tool_name"
       purpose: "Why this tool is called"
-  shared_components:                           # [OPTIONAL]
+      configuration: {}
+  shared_components:                           # [OPTIONAL] Reusable components from Tier 2 catalog
     - name: "component_name"
-      function: "function_name"
+      usage_type: "import"                     # import | extend | wrap
 
-error_handling:
-  strategies:                                  # [REQUIRED]
-    - scenario: "default_error"                # Scenario triggering this handler
-      action: "fail"                           # retry | quarantine | skip | alert | fail
-      max_retries: 3
-      alert_channel: "slack"
+error_strategy:
+  on_error:                                    # [REQUIRED] Default or scenario-keyed error handlers
+    action: "fail"                             # retry | quarantine | skip | fail | warn | alert
+    max_retries: 3
+    retry_delay_seconds: 60
+    escalation: "fail"
 
-governance_hooks:
-  audit:
-    log_inputs: true
-    log_outputs: true
-    metric_collection: true
-  enforcement_points: []                       # Governance rules enforced in this stage
+performance:
+  expected_record_count:
+    min: 0
+    max: 500000
+    alert_on_exceed: true
+  expected_duration_seconds: 300
+  timeout_seconds: 600

@@ -305,10 +305,10 @@ agent:
   name: "customer_data_pipeline"
   description: >
     Ingests raw customer CSVs from S3, validates quality,
-    masks PII, enriches with derived fields, and publishes
-    to the analytics warehouse.
+    enriches with derived fields, and publishes to the
+    analytics warehouse.
   version: "1.0.0"
-  autonomy_level: semi-autonomous
+  autonomy_level: semi_autonomous
 
 stages:
   - id: ingest
@@ -554,8 +554,8 @@ All approach-level decisions made during this phase:
 1. **`meta-agent-architecture.md`** — The meta-agent's architecture: state schema, node inventory, edge map, tool sets per node
 2. **`meta-agent-spec_template.md`** — The YAML template users fill in to describe their DDLC agent
 3. **`metaagent-impl-doc-schema.md`** — Full schema for implementation documents: all supported constructs and fields
-4. **`builder.md`** — How the builder reads impl docs and generates agent code
-5. **`governance.md`** — How governance rules flow from spec → impl docs → generated agent enforcement
-6. **`portfolio_memory.md`** — Portfolio memory design: agent registry, component index, dependency tracking, semantic search
+4. **`builder.md`** — How the builder reads impl docs and compiles agent code
+5. **`metadata-framework/01_metadata_framework.md`** — Unified three-tier metadata framework: catalog, lineage, operational, and audit schemas
+6. **`dcm-agent/dcm_agent.md`** — DCM Schema Engine: Declarative schema lifecycle with Alembic & SQLGlot from YAML data contracts
 7. **`rag.md`** — RAG pipeline: document ingestion, embedding, retrieval
 8. **`implementation-docs/`** — directory of all implementation documents

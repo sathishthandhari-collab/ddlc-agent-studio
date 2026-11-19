@@ -259,7 +259,7 @@ Six domain specialists, each responsible for one concern. Each specialist is a g
 - Translate the approved architecture into YAML implementation documents
 - Produce documents detailed enough that the Builder can generate code without ambiguity
 - Ensure all data contracts are fully specified (every field, every quality rule, every SLA)
-- Ensure all governance rules are mapped to specific enforcement points
+- Ensure all data classifications, quality rules, and SLA definitions are mapped to contracts and stages
 - Ensure all configuration values are externalized (nothing hardcoded)
 - Incorporate revision feedback and re-present
 
@@ -275,12 +275,12 @@ Six domain specialists, each responsible for one concern. Each specialist is a g
 > Detailed design for the Builder specialist is documented in [`builder.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/builder.md).
 
 **Architecture**: Following the pattern established by the DCM Schema Engine, the Builder is explicitly split into:
-1. **Deterministic Scaffold Compiler (Jinja2 + Python AST)**: Zero-LLM compiler that reads `impl_docs/` and emits the read-only orchestration skeleton (`# DO NOT EDIT`) — Pydantic data contracts, Great Expectations checkpoints, runtime state machine wiring (`langgraph`, `python_pipeline`, or `streaming`), governance decorators, and config loaders.
+1. **Deterministic Scaffold Compiler (Jinja2 + Python AST)**: Zero-LLM compiler that reads `impl_docs/` and emits the read-only orchestration skeleton (`# DO NOT EDIT`) — dual-compiled data contracts (Pydantic v2 + Pandera DataFrames), Great Expectations checkpoints, runtime state machine wiring (`langgraph`, `python_pipeline`, or `streaming`), and config loaders.
 2. **LLM Leaf Coder (Custom Handlers & Test Synthesizer)**: Narrowly-scoped LLM worker invoked only when a stage requires bespoke imperative Python logic (via `transform_handler: "handlers/mod.py::func"`). Synthesizes editable, version-controlled handler files (`src/handlers/`) and targeted unit tests.
 
 **Responsibilities**:
 - Read the approved implementation documents and compile the agent's complete codebase
-- Emit immutable skeleton code for data contracts, configuration, governance hooks, and DAG topology
+- Emit immutable skeleton code for data contracts, configuration, and DAG topology
 - Select the code generation strategy based on the declared runtime (`langgraph`, `python_pipeline`, `streaming`)
 - Synthesize custom leaf handlers and isolated pytest suites for stages with bespoke transformation logic
 - For shared components: generate new ones into the shared folder, or generate imports for existing ones
@@ -297,7 +297,7 @@ Six domain specialists, each responsible for one concern. Each specialist is a g
 **Responsibilities**:
 - Verify the generated code matches the implementation documents
 - Check contract compliance — every field in every contract has a corresponding implementation
-- Check governance compliance — every governance rule has an enforcement hook
+- Check quality rule compliance — every contract constraint and stage assertion has corresponding verification
 - Check for hardcoded values — all configuration must be externalized
 - Check shared component usage — reusable components are imported, not duplicated
 - Run generated tests where possible (without live infrastructure)
@@ -524,7 +524,7 @@ Each strategy knows:
 - How to structure a project for that runtime (file layout, entry point, configuration shape)
 - How to express a stage in that runtime (LangGraph node vs. Python function vs. Kafka handler)
 - How to express data contracts in that runtime (Pydantic models, schema validators, etc.)
-- How to express governance hooks in that runtime (state machine gates vs. decorator checks vs. middleware)
+- How to express gates and error routing in that runtime (state machine conditional edges vs. try/catch branching vs. DLQ routing)
 - How to wire stages together (graph edges vs. function calls vs. message routing)
 
 The Builder reads the impl docs (which are the same regardless of runtime) and applies the selected strategy to produce the agent's codebase.
@@ -653,7 +653,7 @@ The coordinator pauses at a human gate. The user reviews the architecture. If ap
 
 The Documentarian specialist takes over. Its projected context is the approved architecture proposal (not the revision history, not the research details, not the Q&A transcripts).
 
-The Documentarian produces YAML implementation documents — one per stage, one per contract, one for governance, one for configuration. Each document is detailed enough that the Builder can generate code without ambiguity.
+The Documentarian produces YAML implementation documents — one manifest (agent.yaml), one per stage, one per contract, one for configuration, and one for test specifications. Each document is detailed enough that the Builder can generate code without ambiguity.
 
 The coordinator pauses at a human gate. The user reviews the impl docs. If revisions are requested, the Documentarian updates the docs, ensuring cross-document consistency (if a contract changes, all references to it update). Loop until approved or maximum revisions reached.
 
@@ -661,17 +661,17 @@ The coordinator pauses at a human gate. The user reviews the impl docs. If revis
 
 The Builder specialist takes over. Its projected context is the approved implementation documents and the shared component source code. Nothing from Part A — the impl docs are the Builder's entire world.
 
-The Builder selects the generation strategy based on the runtime specified in the architecture (which is recorded in the impl docs). It generates stage code, configuration files, governance hooks, and test suites. New shared components go to the shared folder. Existing shared components are imported, not duplicated.
+The Builder selects the generation strategy based on the runtime specified in the architecture (which is recorded in the impl docs). It generates stage code, configuration files, quality suites, and test suites. New shared components go to the shared folder. Existing shared components are imported, not duplicated.
 
 **Phase 7 — Validation**
 
 The Validator specialist takes over. Its projected context is the implementation documents (ground truth) and the generated code (the thing being checked).
 
-The Validator runs a series of checks: contract compliance, governance compliance, no hardcoded values, shared component usage, configuration completeness, and generated tests. If all checks pass, the coordinator routes to delivery. If checks fail, the coordinator routes back to the Builder with fix instructions. The loop runs up to a maximum number of fix attempts, after which the coordinator escalates to the human.
+The Validator runs a series of checks: contract compliance, quality assertion coverage, no hardcoded values, shared component usage, configuration completeness, and generated tests. If all checks pass, the coordinator routes to delivery. If checks fail, the coordinator routes back to the Builder with fix instructions. The loop runs up to a maximum number of fix attempts, after which the coordinator escalates to the human.
 
 **Phase 8 — Delivery**
 
-The coordinator writes all generated files to the agent's project directory. Crucially, the complete `impl_docs/` package (`agent.yaml`, `stages/`, `contracts/`, `governance.yaml`, `config.yaml`, `tests.yaml`) is committed directly into the generated agent's Git repository alongside the generated code as its permanent, authoritative source of truth. The initial `spec.yaml` is archived in the metadata framework (Tier 1 artifact registry) as an immutable Day-0 intake audit record and is retired from active lifecycle use.
+The coordinator writes all generated files to the agent's project directory. Crucially, the complete `impl_docs/` package (`agent.yaml`, `stages/`, `contracts/`, `config.yaml`, `tests.yaml`) is committed directly into the generated agent's Git repository alongside the generated code as its permanent, authoritative source of truth. The initial `spec.yaml` is archived in the metadata framework (Tier 1 artifact registry) as an immutable Day-0 intake audit record and is retired from active lifecycle use.
 
 The coordinator registers the agent, new shared components, and cross-agent dependencies in the metadata framework (Tier 2 catalog and lineage), and presents a delivery summary to the user.
 
@@ -695,7 +695,7 @@ The change flow reuses the same specialists and infrastructure, but operates dir
 - The Spec Analyst loads the agent's active `impl_docs/` directly from its repository or Tier 1 artifact registry.
 - The Architect evaluates cross-component and cross-agent impact: Which stages are affected? Which contracts change? Does this require a DCM schema migration for database tables? Are there downstream agents consuming the modified contract (queried via Tier 2 `contract_lineage` and `agent_dependency`)?
 
-**Phase 3 — Documentation Update**: The Documentarian updates the affected implementation documents (`stages/`, `contracts/`, `governance.yaml`, etc.), maintaining cross-document referential integrity and versioning.
+**Phase 3 — Documentation Update**: The Documentarian updates the affected implementation documents (`stages/`, `contracts/`, `config.yaml`, etc.), maintaining cross-document referential integrity and versioning.
 
 **Phase 4 — Review Gate (Gate 3)**: Execution pauses for human review of the generated YAML diff. Once approved, the flow proceeds to construction.
 
@@ -726,7 +726,7 @@ Every gate has a maximum loop count enforced by the coordinator. No infinite loo
 
 The meta-agent's workflow has multiple evaluation layers built into it — they are not a separate "eval framework" but part of the process itself.
 
-**Structural validation** (automated): The Validator specialist checks contract compliance, governance compliance, hardcoding, shared component usage, configuration completeness, and test passage. These are deterministic checks — they pass or fail.
+**Structural validation** (automated): The Validator specialist checks contract compliance, quality assertion coverage, hardcoding, shared component usage, configuration completeness, and test passage. These are deterministic checks — they pass or fail.
 
 **Human judgment** (the gates): The user reviews the architecture and implementation documents before any code is generated. These are the strongest quality signals. If the architecture is wrong, the user catches it before the Builder wastes effort.
 
@@ -874,6 +874,8 @@ All architecture-level decisions made in this document:
 | 19 | Metadata retention | Keep everything | Permanent retention across all tiers for MVP. Archival/aggregation policies deferred until volume demands it. |
 | 20 | Retire spec.yaml post-build | Single source of truth in `impl_docs/` committed to agent Git repo | Eliminates dual-spec drift. `spec.yaml` is strictly Day-0 intake. Day-2 maintenance modifies `impl_docs/` directly (via Git PR or natural language), never requiring parallel spec synchronization. |
 | 21 | Builder Architecture: Split Compiler + Leaf Coder | Deterministic Scaffold Compiler (Jinja2+AST) + LLM Leaf Coder | Replaced monolithic LLM code generator. Emits read-only orchestration skeleton deterministically from YAML, invokes LLM only for bespoke leaf handlers. Guarantees 100% syntax and contract determinism while keeping imperative logic hotfixable. See [`builder.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/builder.md). |
+| 22 | Pass Pointers, Not Payloads, in Graph State (Claim Check) | Lightweight `ContractPointer` (URI, count, sha256) | Passing multi-megabyte record lists causes OOM and checkpointer bloat. Claim Check pattern (`PAT-01`) stores bulk data externally and passes tamper-evident hashes. |
+| 23 | Retire Standalone Governance; Enterprise Policy Consumer Model | 5-file `impl_docs/` (`agent`, `stages`, `contracts`, `config`, `tests`) + Contract Tagging + Metadata Callbacks | PII tokenization is an edge/catalog concern (Collibra, Snowflake DDM), not bespoke pipeline regexes. Audit is handled via Metadata Framework callbacks. Agents consume enterprise policy rather than compiling bespoke governance modules. |
 
 ---
 
@@ -888,7 +890,7 @@ This document deliberately does not cover:
 - **The spec template** — What fields the user fills in → [`input-spec-template/spec_template.md`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/input-spec-template/spec_template.md)
 - **The implementation doc schema** — Full schema for impl docs → [`implementation-docs/impl_doc_schema.md`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/implementation-docs/impl_doc_schema.md)
 - **Builder generation strategies** — How code is generated per runtime → `builder.md`
-- **Governance enforcement** — How governance flows from spec to agent → `governance.md`
+- **Enterprise Governance Integration** — How DDLC agents act as policy consumers of enterprise platforms (Collibra, Immuta, Snowflake DDM) via contract metadata tags and metadata framework lineage (governed externally, not compiled per-agent)
 - **RAG pipeline** — Ingestion, chunking, retrieval tuning → `rag.md`
 - **Metadata framework DDL & client** — Column-level DDL, callback implementation, Tier 3 generators → [`design-docs/metadata-framework/01_metadata_framework.md`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/metadata-framework/01_metadata_framework.md)
 - **DCM Schema Engine** — Deterministic schema compiler and migration tool with Alembic & SQLGlot → [`design-docs/dcm-agent/dcm_agent.md`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/dcm-agent/dcm_agent.md)
@@ -903,7 +905,6 @@ This document deliberately does not cover:
 1. **[`input-spec-template/spec_template.md`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/input-spec-template/spec_template.md)** — The YAML template users fill in to describe their DDLC agent (Complete)
 2. **[`implementation-docs/impl_doc_schema.md`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/implementation-docs/impl_doc_schema.md)** — Full schema for implementation documents (Complete)
 3. **[`builder.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/builder.md)** — How the builder reads impl docs and compiles agent code per runtime: Deterministic Scaffold Compiler + LLM Leaf Coder (Complete)
-4. **`governance.md`** — Governance enforcement: spec → impl docs → generated agent
+4. **[`dcm-agent/dcm_agent.md`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/dcm-agent/dcm_agent.md)** — DCM Schema Engine: Declarative schema lifecycle with Alembic & SQLGlot from YAML data contracts (MVP — build first)
 5. **[`metadata-framework/01_metadata_framework.md`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/metadata-framework/01_metadata_framework.md)** — Unified three-tier metadata framework: catalog, lineage, operational, and audit schemas (iterative — evolves alongside development)
-6. **[`dcm-agent/dcm_agent.md`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/dcm-agent/dcm_agent.md)** — DCM Schema Engine: Declarative schema lifecycle with Alembic & SQLGlot from YAML data contracts (MVP — build first)
-7. **`rag.md`** — RAG pipeline: document ingestion, domain tagging, embedding, retrieval per specialist
+6. **`rag.md`** — RAG pipeline: document ingestion, domain tagging, embedding, retrieval per specialist
