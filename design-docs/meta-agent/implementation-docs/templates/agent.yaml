@@ -16,15 +16,23 @@ agent:
     - "domain_tag"
 
 architecture:
-  pattern: "stateful_pipeline_with_gates"      # [REQUIRED] Pattern: simple_pipeline | stateful_pipeline_with_gates | batch_processor | streaming_processor | multi_source_aggregator
-  runtime: "langgraph"                         # [REQUIRED] Runtime: langgraph | python_pipeline | streaming
+  pattern: "stateful_pipeline_with_gates"      # [REQUIRED] Pattern: stateful_pipeline_with_gates | react_tool_agent
+  runtime: "langgraph"                         # [REQUIRED] Runtime: langgraph | python_litellm
   autonomy_level: "semi_autonomous"            # [REQUIRED] Autonomy: autonomous | semi_autonomous | human_required
 
 pipeline:
   stages:                                      # [REQUIRED] Ordered stage topology
     - stage_id: "stage_1_id"                   # References stages/stage_<id>.yaml
-      next: "stage_2_id"
+      next: "stage_2_id"                       # Simple unconditional transition
     - stage_id: "stage_2_id"
+      next: "stage_3_id"
+      on_error: "stage_1_id"                   # Self-correction reflection edge
+    - stage_id: "stage_3_id"
+      transitions:                             # Multi-way conditional routing (e.g., human gates, decision branches)
+        on_approved: "stage_4_id"
+        on_revise: "stage_2_id"
+        on_abort: null                         # Terminal transition (END)
+    - stage_id: "stage_4_id"
       next: null                               # Terminal stage
 
 dependencies:
@@ -34,8 +42,22 @@ dependencies:
       used_by: ["stage_1_id"]
       description: "Purpose of tool"
   shared_components:                           # [OPTIONAL] Reusable Tier 2 components
-    - name: "shared_component_name"
+    - component_id: "shared_component_id"       # References component_registry in Tier 2 metadata
       version: "1.0.0"
       used_by: ["stage_1_id"]
       usage_type: "import"                     # import | extend | wrap
       description: "Component capability"
+
+metadata:                                      # [OPTIONAL] Metadata framework tier declarations
+  tier_3_schema: "ddlc_agent_metadata"         # Auto-provisioned by DCM Schema Engine
+  tier_3_tables:
+    - "agent_specific_table"
+  writes_to:
+    tier_1: [agent_run_header, execution_log, artifact_registry, decision_log]
+    tier_2: [agent_registry, component_registry, contract_lineage]
+
+schedule:                                      # [OPTIONAL] Invocation cadence
+  type: "on_demand"                            # on_demand | cron | event_driven
+  schedule: null                               # Cron expression if type is cron
+  timezone: "UTC"
+  description: "Trigger mechanism"

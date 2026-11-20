@@ -174,15 +174,15 @@ These tables capture concepts specific to the Data Development Lifecycle — age
 | Table | Purpose | Key Columns (Conceptual) |
 |---|---|---|
 | **`build_summary`** | Aggregated summary of each build run — operational metrics and revision counts. *(Formerly "portfolio memory — build history".)* | `build_id`, `run_id`, `agent_id`, `spec_version`, `clarification_rounds`, `architecture_revisions`, `impl_doc_revisions`, `build_fix_attempts`, `total_duration_ms`, `outcome` (success/partial/failed), `completed_at` |
-| **`stage_execution`** | Records every stage execution across all DDLC agents. Answers: "How did Stage X perform for Agent Y on this run?" | `stage_exec_id`, `run_id`, `agent_id`, `stage_id`, `stage_name`, `stage_type`, `started_at`, `completed_at`, `status`, `records_in`, `records_out`, `records_quarantined` |
-| **`data_quality_summary`** | Aggregated quality metrics per stage per run. Feeds quality dashboards. | `quality_id`, `run_id`, `agent_id`, `stage_id`, `total_records`, `valid_records`, `quarantined_records`, `quality_score`, `rules_evaluated`, `rules_passed`, `rules_failed`, `timestamp` |
+| **`stage_execution`** | Records every stage execution across all DDLC agents. Answers: "How did Stage X perform for Agent Y on this run?" | `stage_exec_id`, `run_id`, `agent_id`, `stage_id`, `stage_name`, `stage_type`, `started_at`, `completed_at`, `status`, `input_artifact_ref`, `output_artifact_ref`, `tokens_used`, `cost_usd`, `error_details` (JSONB) *(Note: Layer 3 data movers may additionally log `records_processed` in Tier 3)* |
+| **`data_quality_summary`** | Aggregated quality metrics and contract assertion scores per stage run. Feeds quality dashboards. | `quality_id`, `run_id`, `agent_id`, `stage_id`, `contract_ref`, `assertions_evaluated`, `assertions_passed`, `assertions_failed`, `quality_score`, `failure_details` (JSONB), `timestamp` |
 | **`config_snapshot`** | Captures the full configuration state (model tiers, safety valve settings, stage parameters, prompt template versions) for DDLC agents to guarantee complete run reproducibility. *(Detailed design to be finalized later).* | `snapshot_id`, `run_id`, `agent_id`, `config_type` (model_tiers/safety_valves/pipeline_settings/prompt_templates), `config_body` (JSONB), `captured_at` |
 
 ### 4.4 Audit Tables
 
 | Table | Purpose | Key Columns (Conceptual) |
 |---|---|---|
-| **`governance_audit`** | Records every governance rule evaluation. "PII masking rule was applied to field X in Stage Y." | `gov_audit_id`, `run_id`, `agent_id`, `stage_id`, `rule_id`, `rule_name`, `rule_type` (pii_masking/access_control/retention/quality), `evaluation_result` (pass/fail/warning), `details` (JSONB), `timestamp` |
+| **`governance_audit`** | Records every governance rule evaluation. "Classification tag policy evaluated for model/contract X in Stage Y." (Warehouse column tags and central enterprise access policies are validated/applied; no ad-hoc Python masking). | `gov_audit_id`, `run_id`, `agent_id`, `stage_id`, `rule_id`, `rule_name`, `rule_type` (classification_tagging/access_control/retention/contract_policy), `evaluation_result` (pass/fail/warning), `details` (JSONB), `timestamp` |
 | **`stage_gate_record`** | Records every gate check (human or automated) at stage boundaries. | `gate_id`, `run_id`, `stage_id`, `gate_type` (human_approval/automated_check/quality_gate), `gate_status` (passed/failed/overridden), `checked_by`, `timestamp`, `notes` |
 
 ### 4.5 Design Principles
@@ -214,7 +214,7 @@ These tables hold metadata unique to a single agent — data that no other agent
 
 - **Self-contained**: Each agent schema is independent. Dropping an agent drops its schema cleanly.
 - **No cross-agent reads**: Other agents do not query Tier 3 tables. If data needs to be shared, it belongs in Tier 2.
-- **Convention-driven**: The meta-agent generates the Tier 3 schema DDL as part of the build output. The human reviews and executes the DDL manually.
+- **Declarative & GitOps-managed**: The meta-agent generates the Tier 3 YAML contract (`contracts/tier_3_<agent>.yaml`). The Builder invokes the DCM Schema Engine to compile versioned migration artifacts (`dcm plan`), which are applied deterministically via `dcm apply` during deployment (with human approval required for destructive changes).
 
 ---
 
@@ -262,22 +262,41 @@ The blackboard (LangGraph state) and the metadata framework serve different mast
                 └──────────────────────────────────┘
 ```
 
-### 6.2 When Does Metadata Get Written?
+### 6.2 When Does Metadata Get Written? (Decoupled Telemetry vs. Transactional Delivery)
 
-Metadata writes happen via **LangGraph callback hooks** that intercept node lifecycle events. Specialists do not write metadata directly — the callback infrastructure handles it automatically. This keeps metadata concerns out of specialist logic entirely.
+Metadata writes are strictly partitioned across two architectural boundaries: **passive operational telemetry** (captured via callback hooks) and **transactional delivery writes** (executed within an explicit deterministic state graph node).
 
-| Event | Blackboard Action | Metadata Action (via callbacks) |
+#### 1. Passive Operational Telemetry (Callback-Driven via `MetadataCallbackHandler`)
+Operational metrics, spans, token counts, model pricing, error stack traces, and human review gate decisions are captured via **LangGraph callback hooks** (`MetadataCallbackHandler`) that intercept node lifecycle events. Specialists do not write telemetry directly — the callback infrastructure handles it automatically as a read-only side effect. If telemetry logging encounters an issue, it logs a warning without corrupting graph state or failing business logic.
+
+| Event | State / Blackboard Action | Metadata Action (via `MetadataCallbackHandler`) |
 |---|---|---|
-| Run begins | Initialize state with spec | Write `agent_run_header` (and Tier 2 `config_snapshot` for DDLC runs) |
-| Node starts executing | Update current phase/node flags | Write `execution_log` entry (started) |
-| Node completes | Write results to blackboard fields | Update `execution_log` entry (completed) |
-| Artifact produced | Store artifact reference in blackboard (for projection) | Write `artifact_registry`, `artifact_manifest` |
-| Human gate reached | Set gate flag, pause | Write `decision_log` (pending) |
-| Human approves/rejects | Update approval flag, resume | Write `decision_log` (decided), `audit_log` |
-| Error occurs | Write error flag (for routing) | Update `execution_log` (failed status, error message, stack trace) |
-| Stage executes (DDLC agent) | Update stage completion in workflow state | Write `stage_execution`, `data_quality_summary`, `governance_audit` |
-| Run completes | Set terminal state | Update `agent_run_header` (final_status, completed_at) |
-| Agent delivered | — | Write `agent_registry`, `component_registry`, `agent_dependency`, `build_summary` |
+| Run begins | Initialize state with spec | Write `agent_run_header` (status: running) |
+| Node starts executing | Update current phase/node flags | Write `execution_log` entry (started span) |
+| Node completes | Write results to state fields | Update `execution_log` entry (completed span, tokens, latency, cost) |
+| Artifact produced | Store Claim Check reference in state | Write `artifact_registry`, `artifact_manifest` |
+| Human gate reached | Pause execution via `interrupt()` | Write `decision_log` (status: pending) |
+| Human approves/rejects | Resume execution with review payload | Write `decision_log` (status: decided), `audit_log`, `stage_gate_record` |
+| Node error occurs | Write error flag for routing/reflection | Update `execution_log` (status: failed, error_type, stack trace) |
+| Stage completes (DDLC agent) | Update stage completion in workflow state | Write `stage_execution`, `data_quality_summary`, `governance_audit` |
+| Run completes | Set terminal state | Update `agent_run_header` (final_status, completed_at, total_tokens) |
+
+#### 2. Transactional Delivery Writes & Asset Registration (Explicit Deterministic Node)
+Unlike passive telemetry, registering assets into shared catalogs, committing code to Git, recording cross-agent lineage, and appending decisions to RAG are **stateful, transactional business outcomes**. 
+
+These writes **must NOT be executed inside callback hooks** (which would swallow database or Git errors, report false-positive completions, and fail to emit output contracts). Instead, they are executed within an **explicit deterministic state machine node**:
+- **Layer 1 (Meta-Agent Coordinator)**: **Phase 8 Delivery Node** (`node_delivery`)
+- **Layer 2 (Generated DDLC Agent)**: **Delivery Stage Node** (`node_deliver_stage`)
+
+| Delivery Event | Destination / Table | Mechanism | Error Handling |
+|---|---|---|---|
+| Code publication & Git PR | Workspace disk / Git repository | Deterministic Git tool in Delivery Node | Fail-fast: raises `DeliveryError`, halts completion |
+| Agent registration | Tier 2 `agent_registry` | Transactional SQL insert in Delivery Node | Fail-fast: prevents orphaned code without catalog entry |
+| Lineage & dependencies | Tier 2 `contract_lineage`, `agent_dependency` | Transactional SQL insert in Delivery Node | Fail-fast: rolls back registration on schema mismatch |
+| Component sharing | Tier 2 `component_registry` (with pgvector) | Transactional SQL insert in Delivery Node | Fail-fast: surfaces vector embedding timeouts |
+| Build summary | Tier 2 `build_summary` | Transactional SQL insert in Delivery Node | Fail-fast: records revision counts & metrics |
+| Past architectural decision | RAG Knowledge Base (`past_decisions` collection) | pgvector ingestion in Delivery Node | Fail-fast: ensures knowledge base stays synchronized |
+| Terminal contract output | `delivery_manifest` | Node return value into `AgentState["contracts"]` | Validated via Pydantic contract model |
 
 ### 6.3 Metadata Framework vs. RAG Knowledge Layer
 
@@ -342,7 +361,7 @@ Non-destructive changes (`CREATE TABLE`, `CREATE INDEX`, `ADD COLUMN`) apply aut
 | 5 | Schema-per-tier in Postgres | `agent_metadata`, `ddlc_shared_metadata`, `ddlc_{agent}_metadata` | Clean namespace isolation. Drop a tier or agent without affecting others. Standard Postgres schema search_path management. |
 | 6 | Audit log is append-only | No UPDATE or DELETE on `audit_log` | Compliance requirement. Audit trails must be immutable. |
 | 7 | JSONB for flexible payloads | `execution_log.details`, `decision_log.details`, `config_snapshot.config_body`, `governance_audit.details` | Dynamic payloads and configuration formats evolve faster than table schemas. JSONB accommodates this without DDL changes. |
-| 8 | Metadata write mechanism | LangGraph callback hooks | Keeps metadata writes out of specialist logic. Callback hooks intercept node lifecycle events (start, complete, error) and write metadata as a side effect. Clean separation. |
+| 8 | Metadata write mechanism | Decoupled: Callbacks for Tier 1 Telemetry; Explicit Node for Tier 2 Delivery | Keeps passive telemetry out of specialist logic via LangGraph callback hooks (`MetadataCallbackHandler`). Moves transactional delivery writes (`agent_registry`, `contract_lineage`, Git PRs, RAG embeddings) into an explicit deterministic Delivery node so registry and Git failures surface cleanly instead of being swallowed by callback error handlers (Decision 30). |
 | 9 | Retention policy | Keep everything | Start simple. Add archival/aggregation if volume becomes a problem. No premature optimization. |
 | 10 | Schema provisioning | DCM Schema Engine (Alembic + SQLGlot) | Deterministic compiler and migration tool reading from declarative YAML contracts in Git. Eliminates probabilistic LLMs from DDL execution, ensures 100% reproducible migrations, and supports dry-run SQL generation. See [`dcm_agent.md`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/dcm-agent/dcm_agent.md). |
 | 11 | Streamlined Tier 1 tables | Option A (6 core tables) | Dropped redundant `event_log` and `error_catalog` tables. Node telemetry and errors are captured directly in `execution_log` (aligned with OpenTelemetry spans). Moved `config_snapshot` to Tier 2 for domain reproducibility. |

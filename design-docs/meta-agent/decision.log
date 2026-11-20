@@ -62,10 +62,13 @@
 ## Decision 24: Dual-Contract Compilation (Pydantic + Pandera) and Multi-Paradigm Execution Modes (`batch`, `chunked`, `row`)
 
 - **Date**: 2026-11-19
-- **Status**: Approved
+- **Status**: Superseded by Decision 26 (Layer 2 DDLC AI Agent Modeling)
 - **Scope**: Builder Specialist (`src/specialists/builder/`), Contract Compilation (`src/models/`), Stage Specification (`stages/stage_*.yaml`), Runtime Handlers & Tests
 - **Context**: 
   Iterating over 500,000 rows in naive row-by-row Python loops (`[compute_tiers(rec) for rec in records]`) instantiating individual Pydantic models causes severe RAM bloat (2.5 GB – 4.5 GB heap allocation, violating the spec's `max_memory_gb: 8` limit) and unacceptable latency (15–45 seconds single-threaded CPU time vs. 15–30 milliseconds in vectorized engines). Furthermore, while batch ETL transformations require high-speed vectorized columnar processing, event streaming requires per-message processing, and row-level external operations (e.g. LLM reasoning or rate-limited REST APIs) require memory-bounded chunking.
+
+> [!NOTE]
+> This decision addressed batch ETL execution modes when the architecture was inadvertently modeling Layer 3 data pipelines (`customer_data_pipeline`). With Decision 26, the architecture pivoted to modeling Layer 2 DDLC AI Agents (`dbt_pipeline_builder_agent`), retiring Pandera DataFrame compilation and batch execution modes in favor of typed agent state/artifact contracts.
 - **Decision**:
   1. **Multi-Paradigm Execution Modes**: Support three explicit execution modes declared under `processing` in `stages/stage_*.yaml`:
      - `batch`: Vectorized Polars (default) or Pandas DataFrame processing.
@@ -86,3 +89,159 @@
   - **Single Source of Truth Preserved**: A single YAML contract drives both row-level Pydantic models and vectorized Pandera DataFrame schemas without contract drift.
   - **Bounded Memory for Row Operations**: `chunked` mode clamps peak memory to $O(\text{chunk\_size})$ for un-vectorizable external calls.
 - **Reference**: [`builder.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/builder.md), [`impl_doc_schema.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/implementation-docs/impl_doc_schema.md), [`templates/stage.yaml`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/implementation-docs/templates/stage.yaml)
+
+## Decision 25: Dual Leaf Coder Operating Modes (`create` vs `patch`) and CI Drift Reconciliation for Emergency Hotfixes
+
+- **Date**: 2026-11-19
+- **Status**: Approved
+- **Scope**: Builder Specialist (`src/specialists/builder/leaf_coder/`), Change Request Lifecycle, CI/CD Pipeline
+- **Context**: 
+  In Day-2 operations, on-call engineers may hotfix custom imperative logic directly in `src/handlers/*.py` (e.g. changing `spend > 5000` to `spend >= 5000`) during an emergency without immediately updating `stages/stage_*.yaml` (`processing.logic_description`). Later, when a user requests a conversational feature addition (e.g. "Add a VIP tier") via the Meta-Agent, a naive Leaf Coder reading only the YAML description would regenerate the handler file from scratch, silently overwriting the 2 AM hotfix and re-introducing the production bug ("The 2 AM Hotfix Overwrite Trap").
+- **Decision**:
+  1. **Dual Leaf Coder Modes**:
+     - `create` Mode (Day-0 Synthesis): Invoked when `handlers/<file>.py` does not yet exist. Synthesizes a new handler and test suite from contracts and `logic_description`.
+     - `patch` Mode (Day-2 Surgical Mutation): Invoked when `handlers/<file>.py` already exists on disk. Projects the **existing handler source code** and **existing tests** into context alongside the YAML change diff. Operates as an intelligent code patcher/refactorer, applying only the requested feature delta while preserving existing boundary hotfixes, inline logic, and comments.
+  2. **CI Drift Detection (`ddlc check-drift`)**:
+     A non-blocking CI workflow verifies if a PR modifies `src/handlers/` without modifying `impl_docs/stages/`. If detected, CI issues an advisory check warning:  
+     `[DRIFT-WARNING] Handlers modified without impl_docs. Run 'ddlc sync-docs' post-incident.`
+  3. **Post-Incident Doc Sync (`ddlc sync-docs`)**:
+     Provides bi-directional synchronization tooling where the Spec Analyst reverse-syncs handler docstrings and logic diffs back into `stage_*.yaml` (`processing.logic_description`), restoring complete Single Source of Truth consistency.
+- **Consequences**:
+  - **Eliminates Hotfix Regressions**: Conversational change requests will never silently overwrite manual emergency fixes.
+  - **Preserves Developer Hotfix Autonomy**: Engineers can fix production issues at 2 AM with standard Git commits without being blocked by YAML validation gates.
+  - **Living Single Source of Truth**: CI alerts and reverse-sync tooling guarantee that `impl_docs/` remains the permanent, accurate reflection of the running codebase.
+- **Reference**: [`builder.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/builder.md)
+
+## Decision 26: Layer 2/Layer 3 Separation — Modeling DDLC AI Agents with Canonical `dbt_pipeline_builder_agent`
+
+- **Date**: 2026-11-19
+- **Status**: Approved
+- **Scope**: Entire Meta-Agent Architecture, `spec_template.md`, `impl_doc_schema.md`, `builder.md`, `architecture.md`
+- **Context**: 
+  Prior documentation inadvertently collapsed Layer 2 (DDLC AI Agents) and Layer 3 (Data Pipelines), treating `customer_data_pipeline` (moving 500k CSV rows from S3 to Snowflake via Polars/Pandas batch loops) as the canonical example. This forced the Builder and Implementation Documents to model low-level data engine execution modes (`batch`, `chunked`, `row`), dual-contract compilation to Pandera DataFrameModels, and streaming Kafka consumers. However, the Meta-Agent is an agent factory whose purpose is to design, compile, and maintain specialized DDLC AI agents that reason, plan, validate, and deliver data pipelines — not the raw data pipelines themselves.
+- **Decision**:
+  1. **Canonical Agent Pivot**: Adopt `dbt_pipeline_builder_agent` as the canonical reference agent across all design documentation.
+  2. **Layer 2 Agent Primitives**:
+     - `stages/*.yaml`: Replaces ETL stage types (`ingestion`, `validation`, `transformation`, `publication`) with Agentic stage types (`discovery`, `reasoning`, `code_generation`, `sandbox_testing`, `human_review`, `delivery`).
+     - `processing`: Declares `processing_type: llm_reasoning | deterministic_tool | human_gate`, LiteLLM model tier configurations, tool bindings (`@tool` with `read_only` vs `side_effecting`), and agentic self-correction safety valves (retry / reflect loops).
+  3. **Simplified Runtimes**: Retires the Kafka streaming consumer and raw Python pipeline. Supported runtimes are streamlined to:
+     - `langgraph`: Stateful tool-calling agent with reflection loops and human approval gates (`interrupt()`).
+     - `python_litellm`: Lightweight linear runner for event/CLI dispatch.
+  4. **Pydantic / Instructor Contracts**: Replaces row-by-row batch schemas and Pandera DataFrames with typed agent state and artifact contracts (`source_schema_profile`, `transformation_plan`, `dbt_artifact_bundle`, `delivery_manifest`).
+  5. **Claim Check Re-scoping**: Claim Check (`PAT-01`) stores generated code repository bundles, AST trees, or diffs externally, passing tamper-evident SHA-256 hashes (`bundle_id`, `storage_uri`, `artifact_sha256`) in LangGraph state.
+  6. **Retirement of Pandera & Vectorized Batch Modes**: Supersedes the Pandera `DataFrameModel` compilation and 500k-row vectorized execution modes introduced in Decision 24.
+- **Consequences**:
+  - Establishes crisp architectural separation: Layer 1 (Meta-Agent Factory) builds Layer 2 (DDLC AI Agents) which build and operate Layer 3 (Data Pipelines).
+  - Eliminates dead-weight ETL batch fields and dual compilation overhead.
+  - The Skeleton vs Muscle split is even more robust in Layer 2: deterministic compiler handles StateGraph orchestration, tool bindings, and telemetry; LLM Leaf Coder handles only leaf tool logic and prompt templates.
+- **Reference**: [`architecture.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/architecture.md), [`spec_template.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/input-spec-template/spec_template.md), [`impl_doc_schema.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/implementation-docs/impl_doc_schema.md), [`builder.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/builder.md)
+
+---
+
+### Decision 27: Resolving Runtime Bugs, Claim Check File Staging, Multi-Way Routing, and Tool Hook Standardization
+
+- **Date**: 2026-11-20
+- **Status**: Accepted
+- **Context**: 
+  A comprehensive technical audit following the Layer 2 pivot (Decision 26) surfaced 7 concrete runtime bugs, cross-document drift, and design traps across the specification and builder documentation:
+  1. *Claim Check vs. LLM Output Mismatch*: Instructor was asked to emit `DbtArtifactBundle` (`storage_uri`, `artifact_sha256`) directly from LLM generation, but an LLM cannot write files to disk or calculate true cryptographic hashes.
+  2. *Broken Human Gate Edge*: The review stage node returned a boolean approval flag, but the graph wired an unconditional edge to the delivery stage, causing rejections to still open Pull Requests.
+  3. *Broken `transform_handler` Contract*: A top-level stage hook (`stage.transform_handler`) with signature `(sql, dialect) -> Tuple[bool, str]` conflicted with stage I/O contracts.
+  4. *Unresolved Symbols & File Discrepancies*: `graph.py` referenced missing `DATABASE_URI`, lacked checkpointer/metadata DB settings, and had prompt template naming mismatches.
+  5. *Layer 3 Streaming/Kafka Remnants*: Outdated streaming engine diagrams and manual DDL instructions remained in architecture and metadata documents.
+  6. *Template vs. Example Schema Gaps*: The blank input spec template was missing recursive `items:` and `storage_mode:`, and used inconsistent scheduling enums.
+  7. *Tier 3 DDL Provisioning Contradiction*: Metadata framework docs described manual DDL execution alongside declarative GitOps DCM compilation.
+- **Decision**:
+  1. **Separation of LLM File Generation from Claim Check Staging**: The LLM synthesizes structured file contents (`GeneratedFileSet(files=[GeneratedFile(path, content)])`). The deterministic StateGraph node stages files to disk in `DBT_SANDBOX_DIR`, calculates the true SHA-256 hash, and constructs the Claim Check pointer `DbtArtifactBundle`.
+  2. **Multi-Way Conditional Human Review Edge**: Replaced unconditional edges with `route_review` handling `"approved"` -> `deliver_stage`, `"revise"` -> `generate_stage` (with reviewer feedback injected into diagnostics), and `"abort"` -> `END`. Added `transitions:` to `agent.yaml` stage definitions.
+  3. **Custom Tool Hook Standardization**: Retired top-level `stage.transform_handler`. Custom Leaf Coder hooks are declared on individual tools under `processing.tools[]` with explicit `type: custom_code`, `handler: "<path>::<func>"`, and typed `signature: "..."`.
+  4. **Settings & Telemetry Wiring**: Added `CHECKPOINTER_DB_URI` and `METADATA_DB_URI` to `AgentSettings` and wired `MetadataCallbackHandler` into graph execution config. Standardized prompt filenames to `prompts/stage_<id>.jinja2`.
+  5. **Purged Legacy Layer 3 Remnants**: Removed Kafka/PySpark streaming diagrams from `ddlc-agent-studio-architecture.md`, updated RAG knowledge docs to LiteLLM/Instructor/dbt/SQLGlot/Postgres, and expanded infrastructure systems to include `git_repo`, `data_catalog`, `dbt_project`, `relational_db`. Standardized scheduling to `on_demand | cron | event_driven`.
+  6. **Input Spec Template Alignment**: Added `storage_mode: inline | claim_check` and recursive `items:` / `model_name:` support to `spec_template.md` blank template and field table.
+  7. **DCM GitOps Harmonization**: Updated `01_metadata_framework.md` to state that Tier 3 agent schemas are compiled (`dcm plan`) and applied (`dcm apply`) via the declarative DCM Schema Engine.
+- **Consequences**:
+  - Eliminates all compilation, parser, and runtime failures prior to compiler implementation.
+  - Ensures 100% mathematical fidelity between input specs, implementation documents, and generated Python ASTs.
+  - Preserves the "Skeleton vs. Muscle" and "The Graph Orchestrates, the LLM Reasons" core tenets.
+- **Reference**: [`builder.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/builder.md), [`impl_doc_schema.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/implementation-docs/impl_doc_schema.md), [`spec_template.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/input-spec-template/spec_template.md), [`01_metadata_framework.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/metadata-framework/01_metadata_framework.md), [`ddlc-agent-studio-architecture.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/ddlc-agent-studio-architecture.md)
+
+---
+
+### Decision 28: Universal Jinja2 Prompt Contract & Static AST Verification
+
+- **Date**: 2026-11-20
+- **Status**: Accepted
+- **Context**: 
+  In the generated agent codebase, `src/graph.py` (compiled deterministically by the Skeleton) invoked prompt rendering with ad-hoc variable names (e.g. `source_profile=profile`, `plan=plan`), while `src/prompts/*.jinja2` is editable Muscle authored by the Leaf Coder or engineers. Without a formal interface between them, editing or regenerating a prompt template would cause runtime `jinja2.exceptions.UndefinedError` crashes or silent empty injections.
+- **Decision**:
+  1. **The Universal Prompt Context Contract (`PromptContext`)**: Standardized an identical 4-key context injected by the deterministic Scaffold Compiler into every `llm_reasoning` stage render call:
+     - `input`: The validated input contract Pydantic model or dictionary.
+     - `diagnostics`: List of prior reflection/compiler error strings (`List[str]`).
+     - `feedback`: List of human reviewer guidance strings from gates (`List[str]`).
+     - `config`: Non-secret stage parameters and target platform settings (`Dict[str, Any]`).
+  2. **Fail-Fast `StrictUndefined` Enforcement**: Configured `jinja2.Environment(..., undefined=StrictUndefined)` in `src/graph.py` so any unprovided variable raises an explicit exception rather than rendering blank text.
+  3. **Phase 7 Static AST Validation**: Added a deterministic Validator check using `jinja2.meta.find_undeclared_variables()` on parsed template ASTs, verifying that all template variables belong to `{input, diagnostics, feedback, config}` prior to deployment.
+- **Consequences**:
+  - Eliminates runtime prompt crashes and decouples prompt authoring from graph compilation.
+  - Allows prompt templates to natively render error reflection and human gate feedback directly via `{% if diagnostics %}` and `{% if feedback %}` rather than relying on ad-hoc message appending.
+  - Ensures 100% static compile-time validation for prompt templates in CI/Phase 7.
+- **Reference**: [`builder.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/builder.md), [`impl_doc_schema.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/implementation-docs/impl_doc_schema.md), [`architecture.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/architecture.md)
+
+---
+
+### Decision 29: Cross-Document Drift Reconciliation & Deterministic Settings Alignment
+
+- **Date**: 2026-11-20
+- **Status**: Accepted
+- **Context**: 
+  Following the Layer 2 pivot (Decision 26), multiple subtle schema divergences, retired field names, syntax discrepancies, and stale pre-pivot documentation references persisted across specification files, templates, and builder code.
+- **Decision**:
+  1. **Eliminated Retired `transform_handler`**: Replaced all remaining occurrences in `impl_doc_schema.md` (Sections 9, 10.2, 10.3, and Decision #16) with `processing.tools[].handler`.
+  2. **Synchronized Blank `contract.yaml` Template**: Overwrote `templates/contract.yaml` to include `storage_mode: inline | claim_check`, `classification`, `tags`, `object` type with recursive `items.model_name` and nested `fields[]`, and `sla.latency.max_processing_seconds` matching Section 4.3 and Section 6 of `impl_doc_schema.md`.
+  3. **Standardized Shared Component Syntax**: Unified on `processing.tools[].type: shared_component` in stage definitions, removed redundant `processing.shared_components[]` list, and centralized `usage_type` exclusively within `agent.yaml`.
+  4. **Unified Array Items Syntax & 7-Contract Chain**: Replaced scalar `items: "string"` with typed object `items: { type: string }` across `spec_template.md`. Aligned stage IDs (`discover`, `plan`, `generate`, `dry_run`, `review`, `deliver`) and harmonized the complete 7-contract chain (`source_database_reference`, `source_schema_profile`, `transformation_plan`, `dbt_artifact_bundle`, `compilation_report`, `reviewed_artifact_bundle`, `delivery_manifest`) across `spec_template.md`, `impl_doc_schema.md`, and `builder.md`.
+  5. **Deterministic BaseSettings & Framework Mixin**: Structured `src/core/config.py` into nested Pydantic models (`SourcesConfig`, `DestinationsConfig`, `DbtConfig`, `LLMConfig`) using `SettingsConfigDict(env_nested_delimiter="__")` so `${config.a.b.c}` maps 1:1 to `settings.a.b.c` without ad-hoc key flattening. Extracted `CHECKPOINTER_DB_URI` and `METADATA_DB_URI` into a shared `FrameworkRuntimeSettings` mixin.
+  6. **Reconciled Pre-Pivot Documentation**:
+     - In `impl_doc_schema.md` Section 7.2, replaced legacy Great Expectations checkpoints with Instructor Pydantic contract validators and native Layer 3 dbt generic tests (`unique`, `not_null`, `relationships`).
+     - In `01_metadata_framework.md` Table `governance_audit`, replaced per-stage Python `pii_masking` with enterprise classification tagging and access policy evaluation.
+     - In `approach.md`, added a historical note identifying it as a v0.4 genesis concept document and clarified that `spec.yaml` is retired post-build in favor of `impl_docs/*.yaml`.
+- **Consequences**:
+  - Ensures zero syntactic or semantic drift between spec templates, implementation documents, and generated Python code.
+  - Guarantees deterministic environment variable injection and typed configuration binding for all generated Layer 2 agents.
+  - Completely eliminates outdated references to Layer 3 batch ETL pipelines and retired schema constructs.
+- **Reference**: [`impl_doc_schema.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/implementation-docs/impl_doc_schema.md), [`builder.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/builder.md), [`spec_template.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/input-spec-template/spec_template.md), [`contract.yaml`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/implementation-docs/templates/contract.yaml), [`approach.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/approach.md), [`01_metadata_framework.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/metadata-framework/01_metadata_framework.md)
+
+---
+
+### Decision 30: Decouple Passive Telemetry Callbacks from Transactional Delivery Writes
+
+- **Date**: 2026-11-20
+- **Status**: Approved
+- **Scope**: Metadata Framework (`01_metadata_framework.md`), Builder Compiler (`builder.md`), Meta-Agent Architecture (`architecture.md`, `ddlc-agent-studio-architecture.md`), Generated DDLC Agent Graph (`src/graph.py`).
+- **Context**: 
+  Earlier designs over-generalized metadata capture by stating that all metadata writes—including Tier 2 catalog registration (`agent_registry`), dependency lineage (`contract_lineage`), and RAG vector store indexing (`past_decisions`)—should occur via LangGraph callback hooks (`MetadataCallbackHandler`). However, callbacks in LangChain/LangGraph are designed as non-intrusive observers for telemetry (spans, durations, token counts, pricing, errors). Using callbacks for transactional business outcomes created severe risks:
+  1. *Swallowed Errors*: Framework callback managers typically log callback exceptions as non-fatal warnings to avoid interrupting primary pipelines. If database registration, constraint checks, or Git pushes failed inside a callback, the error would be swallowed, resulting in "successful" runs that left behind orphaned code without catalog entries.
+  2. *Uncontrolled Crashes*: If callback errors were unhandled, they crashed invocations outside the StateGraph runner, bypassing state checkpointing, error diagnostics, and deterministic retry/compensation logic.
+  3. *State Invisibility & Contract Gaps*: Callbacks cannot mutate `AgentState`. Therefore, a callback could not return the terminal `delivery_manifest` contract (`commit_sha`, `pr_url`, `catalog_id`), leaving the state graph incomplete.
+  4. *SRP Violation*: Overloading a telemetry handler with Git operations, relational catalog insertions, and pgvector embeddings created a bloated, untestable God-object.
+- **Decision**:
+  1. **Strict Decoupling of Telemetry and Delivery**:
+     - **Passive Operational Telemetry (`MetadataCallbackHandler`)**: Stays in callback hooks. Captures Tier 1 operational metadata (`agent_run_header`, `execution_log`, `decision_log`). Functions as a read-only observer; errors in logging do not fail business logic.
+     - **Transactional Delivery Writes (Explicit Deterministic Node)**: Executed exclusively within an explicit deterministic state graph node:
+       - **Layer 1 (Meta-Agent Coordinator)**: **Phase 8 Delivery Node** (`node_delivery`) writes codebase to disk, commits `impl_docs/` to Git, registers `agent_registry` and `contract_lineage`, and indexes `past_decisions` into pgvector RAG.
+       - **Layer 2 (Generated DDLC Agent)**: **Delivery Stage Node** (`node_deliver_stage`) creates a Git branch, commits files, opens a Pull Request, registers pipeline lineage in `ddlc_shared_metadata.contract_lineage`, and returns the validated `DeliveryManifest` contract into `AgentState`.
+  2. **Fail-Fast Transactional Semantics**:
+     Any failure in Git publication or Tier 2 database operations inside the delivery node raises an explicit `RuntimeError`, records actionable diagnostics into state, and cleanly halts execution.
+  3. **Canonical Delivery Node Implementation**:
+     Added `node_deliver_stage` and `DeliveryManifest` model to the canonical `src/graph.py` reference implementation in `builder.md`.
+- **Consequences**:
+  - Eliminates silent registration failures and prevents false-positive pipeline completions.
+  - Guarantees 100% adherence to Principle 1 ("The Graph Orchestrates, the LLM Reasons") and Principle 2 ("Skeleton vs. Muscle").
+  - Ensures the 7-contract chain terminates with a validated `delivery_manifest` stored in `AgentState`.
+  - Preserves clean separation of concerns: lightweight telemetry handlers remain decoupled from domain-level persistence.
+- **Reference**: [`01_metadata_framework.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/metadata-framework/01_metadata_framework.md), [`builder.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/builder.md), [`architecture.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/architecture.md), [`ddlc-agent-studio-architecture.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/ddlc-agent-studio-architecture.md)
+
+
+
+
+

@@ -60,100 +60,82 @@ This is the same pattern used by OpenAPI specifications, dbt `schema.yml`, Kuber
 
 Implementation documents specify **WHAT** each stage does, not **HOW** it does it in code. The Builder decides the HOW based on the runtime the Architect selected.
 
-This abstraction exists because the meta-agent builds agents with completely different architectures from the same process. One agent might be a full LangGraph state machine. Another might be a simple Python batch script. Another might be a streaming Kafka processor. The implementation documents are identical in format regardless of runtime — the Builder's generation strategy is what changes.
+This abstraction exists because the meta-agent builds AI agents with different architectures and runtimes from the same specification process. One DDLC agent might be a full LangGraph state machine with ReAct tool-calling loops and human approval gates. Another might be a lightweight event-driven or CLI agent powered by Python + LiteLLM. The implementation documents are identical in format regardless of runtime — the Builder's generation strategy is what changes.
 
-### The Same Impl Doc, Three Different Outputs
+### The Same Impl Doc, Two Different Outputs
 
 Consider this stage specification from an impl doc:
 
 ```yaml
-id: validate_quality
-type: validation
+id: discover_sources
+name: "Discover Source Schemas"
+type: discovery
 description: >
-  Validates incoming customer records against quality rules.
-  Records that fail validation are quarantined with reason codes.
-  A summary of validation results is logged to the audit trail.
+  Introspects source relational database catalogs to extract table schemas,
+  column definitions, data types, and primary key constraints.
 autonomy: autonomous
-input_contract: customer_raw
-output_contract: customer_validated
+input:
+  source:
+    type: "database"
+    uri: "${config.sources.postgres_oltp.uri}"
+output:
+  contract: source_schema_profile
+processing:
+  processing_type: deterministic_tool
+  tools:
+    - name: inspect_information_schema
+      purpose: "Extract information_schema metadata via database inspector"
+      access: read_only
 error_strategy:
-  action: quarantine
-  quarantine_destination: "staging.customer_quarantine"
-  log_summary: true
-  proceed_with_valid: true
-tools:
-  - great_expectations
-governance:
-  - rule: audit_quarantined_records
-    action: log_to_audit_trail
+  on_connection_error:
+    action: retry
+    max_retries: 3
+    retry_delay_seconds: 30
+    escalation: fail
 ```
 
 The Builder reads this spec and generates different code depending on the runtime:
 
-**LangGraph Runtime** — becomes a node in a state machine using Claim Check pointers:
+**LangGraph Runtime** — becomes a node in a state machine storing the contract in `AgentState`:
 ```python
-# Generated: stages/validate_quality.py
+# Generated: src/stages/discover_sources.py
 from typing import Dict, Any
-from langgraph.graph import StateGraph
-from great_expectations import DataContext
+from src.models.contracts_pydantic import SourceSchemaProfile
+from src.tools.db_inspector import inspect_information_schema
+from src.core.config import settings
 
-def validate_quality(state: AgentState) -> Dict[str, Any]:
-    """Validates customer records against quality rules using Claim Check pointer."""
-    in_ptr = state["contracts"]["customer_raw"]
-    context = DataContext()
-    results = context.run_checkpoint(
-        checkpoint_name="customer_raw_quality",
-        batch_request={"uri": in_ptr["uri"]}
+def discover_sources(state: AgentState) -> Dict[str, Any]:
+    """Introspects source database schema and updates graph state with profile contract."""
+    profile_data = inspect_information_schema(
+        connection_uri=settings.SOURCE_POSTGRES_URI,
+        target_schema="public"
     )
-    valid_uri, quarantined_uri, valid_count, quarantined_count, sha256 = partition_and_store(results, state["run_id"])
-    log_quarantine_audit(quarantined_uri, quarantined_count, state["run_id"])
+    # Deterministic contract validation via Pydantic
+    profile = SourceSchemaProfile.model_validate(profile_data)
     return {
         "contracts": {
             **state["contracts"],
-            "customer_validated": {
-                "contract_id": "customer_validated",
-                "uri": valid_uri,
-                "record_count": valid_count,
-                "payload_sha256": sha256,
-            }
+            "source_schema_profile": profile.model_dump()
         },
-        "quarantine_count": quarantined_count,
-        "quality_score": valid_count / (valid_count + quarantined_count) if (valid_count + quarantined_count) > 0 else 0.0,
+        "discovery_status": "completed"
     }
 ```
 
-**Python Pipeline Runtime** — becomes a function in a sequential script:
+**Python + LiteLLM Runtime** — becomes a function in a linear script:
 ```python
-# Generated: pipeline.py
-def validate_quality(df: pd.DataFrame, config: Config) -> pd.DataFrame:
-    """Validates customer records against quality rules."""
-    context = DataContext()
-    results = context.run_checkpoint(
-        checkpoint_name="customer_raw_quality",
-        batch_request=BatchRequest(dataframe=df)
-    )
-    valid_df, quarantine_df = partition_results(results)
-    quarantine_df.to_sql("customer_quarantine", config.staging_engine)
-    log_quarantine_audit(quarantine_df, config.audit_engine)
-    return valid_df
-```
+# Generated: src/pipeline.py
+from src.models.contracts_pydantic import SourceSchemaProfile
+from src.tools.db_inspector import inspect_information_schema
 
-**Streaming Runtime** — becomes a handler in a Kafka consumer:
-```python
-# Generated: handlers/validate_quality.py
-class ValidateQualityHandler(MessageHandler):
-    """Validates customer records against quality rules."""
-    def handle(self, message: CustomerRawMessage) -> CustomerValidatedMessage:
-        context = DataContext()
-        result = context.run_validation(
-            expectation_suite="customer_raw_quality",
-            batch=message.to_batch()
-        )
-        if not result.success:
-            self.quarantine(message, result.failures)
-            self.audit_log(message, result.failures)
-            return None  # Drop from stream
-        return CustomerValidatedMessage.from_raw(message)
+def run_discover_stage(context: PipelineContext) -> SourceSchemaProfile:
+    """Executes source schema introspection in linear pipeline runtime."""
+    profile_data = inspect_information_schema(
+        connection_uri=context.config.source_postgres_uri,
+        target_schema="public"
+    )
+    profile = SourceSchemaProfile.model_validate(profile_data)
+    context.contracts["source_schema_profile"] = profile
+    return profile
 ```
 
 The impl doc didn't change. The Builder's generation strategy changed. This is why the Documentarian never needs to know the runtime — it writes the same specification regardless.
@@ -165,16 +147,24 @@ The impl doc didn't change. The Builder's generation strategy changed. This is w
 An implementation document set for a DDLC agent consists of multiple YAML files organized in a standard directory structure. Each file has a single responsibility.
 
 ```
-<agent_name>/
+dbt_pipeline_builder_agent/
 ├── agent.yaml                    # Agent manifest — identity, runtime, architecture
-├── stages/                       # One file per pipeline stage
-│   ├── stage_ingest.yaml
-│   ├── stage_validate.yaml
-│   └── stage_enrich.yaml
-├── contracts/                    # One file per data contract
-│   ├── customer_raw.yaml
-│   └── customer_validated.yaml
-├── config.yaml                   # All externalized configuration
+├── stages/                       # One file per agent stage
+│   ├── stage_discover.yaml
+│   ├── stage_plan.yaml
+│   ├── stage_generate.yaml
+│   ├── stage_dry_run.yaml
+│   ├── stage_review.yaml
+│   └── stage_deliver.yaml
+├── contracts/                    # One file per agent state/artifact contract
+│   ├── source_database_reference.yaml  # Initial database reference input parameters
+│   ├── source_schema_profile.yaml      # Discovered database catalog schema
+│   ├── transformation_plan.yaml        # Architecture DAG plan
+│   ├── dbt_artifact_bundle.yaml        # Synthesized dbt models & YAML Claim Check pointer
+│   ├── compilation_report.yaml         # Sandbox test & compiler diagnostics
+│   ├── reviewed_artifact_bundle.yaml   # Human-approved artifact pointer
+│   └── delivery_manifest.yaml          # Git branch, commit, and Pull Request manifest
+├── config.yaml                   # All externalized configuration & tool settings
 └── tests.yaml                    # Test cases derived from contracts & quality rules
 ```
 
@@ -213,7 +203,7 @@ An implementation document set for a DDLC agent consists of multiple YAML files 
 
 > [!NOTE]
 > **Schema Rules vs. Reference Walkthrough Values**  
-> In the schemas below, field annotations explain the schema rules (types, requirements, allowed values). To make cross-document references and dependencies tangible and realistic, the example YAML blocks are populated with values from our canonical reference agent: `"customer_data_pipeline"` (comparable to the Swagger Petstore in OpenAPI).  
+> In the schemas below, field annotations explain the schema rules (types, requirements, allowed values). To make cross-document references and dependencies tangible and realistic, the example YAML blocks are populated with values from our canonical reference agent: `"dbt_pipeline_builder_agent"` (comparable to the Swagger Petstore in OpenAPI).  
 > The comprehensive field tables define the generic schema rules for *any* DDLC agent, and the complete multi-file suite for this reference agent is assembled in [Section 9 (A Complete Example)](#9-a-complete-example).
 
 ### 4.1 Agent Manifest — `agent.yaml`
@@ -231,30 +221,26 @@ The agent manifest is the entry point for the entire impl doc set. It declares w
 
 # --- Agent Identity -------------------------------------------
 agent:
-  name: "customer_data_pipeline"               # Unique agent identifier. Used in file paths, metadata registry, and cross-agent references.
-  display_name: "Customer Data Pipeline"       # Human-readable name for UI and documentation.
+  name: "dbt_pipeline_builder_agent"           # Unique agent identifier. Used in file paths, metadata registry, and cross-agent references.
+  display_name: "dbt Pipeline Builder Agent"   # Human-readable name for UI and documentation.
   version: "1.0.0"                             # Semantic version. Incremented on every impl doc revision.
   description: >                               # Human-readable purpose statement. NOT read by the Builder for code generation
-    Ingests raw customer CSVs from S3, validates data quality,               # — exists purely for human understanding.
-    masks PII fields (email, phone), enriches with derived fields
-    (customer_tier, signup_cohort), and publishes validated records
-    to the analytics Snowflake warehouse. Runs daily on a schedule.
-  owner: "data-engineering-team"               # Team or individual responsible for this agent.
+    Introspects source database catalogs, plans transformation              # — exists purely for human understanding.
+    models, generates dbt SQL models and schema YAMLs, dry-runs
+    compilation in a sandbox, routes artifacts through human review,
+    and opens a Git Pull Request with Tier 2 lineage registration.
+  owner: "analytics-engineering-team"          # Team or individual responsible for this agent.
   tags:                                        # Searchable tags for metadata catalog discovery.
-    - "customer"
-    - "pii"
-    - "batch"
-    - "daily"
+    - "dbt"
+    - "code_generation"
+    - "schema_discovery"
+    - "gitops"
 
 # --- Architecture Selection -----------------------------------
 architecture:
-  pattern: "stateful_pipeline_with_gates"      # Pattern from the catalog. See architecture.md Section 7.1.
-                                               # Valid patterns: simple_pipeline, stateful_pipeline_with_gates,
-                                               # batch_processor, streaming_processor, multi_source_aggregator
-  runtime: "langgraph"                         # The runtime the Builder uses to select its generation strategy.
-                                               # Valid runtimes: langgraph, python_pipeline, streaming
-  autonomy_level: "semi_autonomous"            # How much the agent can do without human intervention.
-                                               # Valid levels: autonomous, semi_autonomous, human_required
+  pattern: "stateful_pipeline_with_gates"      # Pattern from catalog: stateful_pipeline_with_gates, react_tool_agent
+  runtime: "langgraph"                         # Generation strategy: langgraph, python_litellm
+  autonomy_level: "semi_autonomous"            # Autonomy level: autonomous, semi_autonomous, human_required
 
 # --- Stage Ordering -------------------------------------------
 # Declares the pipeline topology. The Builder uses this to wire
@@ -262,15 +248,23 @@ architecture:
 # have a corresponding file in stages/stage_<id>.yaml.
 pipeline:
   stages:
-    - stage_id: ingest                         # References stages/stage_ingest.yaml
-      next: validate                           # Linear flow: ingest → validate
-    - stage_id: validate
-      next: enrich
-      on_error: quarantine_handler             # Conditional routing on validation failure
-    - stage_id: enrich
-      next: publish
-    - stage_id: publish
-      next: null                               # Terminal stage — no successor
+    - stage_id: discover                       # References stages/stage_discover.yaml
+      next: plan                               # Linear flow: discover → plan
+    - stage_id: plan
+      next: generate
+    - stage_id: generate
+      next: dry_run
+      on_error: plan                           # Self-correction loop: retry planning on compilation failure
+    - stage_id: dry_run
+      next: review                             # Advances to human gate upon successful dry-run
+      on_error: generate                       # Loop back to code generation on dry-run failure
+    - stage_id: review
+      transitions:                             # Multi-way human review gate routing
+        on_approved: deliver
+        on_revise: generate                    # Returns to code generation with reviewer feedback
+        on_abort: null                         # Terminates workflow (END)
+    - stage_id: deliver
+      next: null                               # Terminal stage — opens PR & registers in catalog
 
 # --- Dependencies & Shared Components -------------------------
 # External tools, libraries, and shared components this agent
@@ -278,67 +272,70 @@ pipeline:
 # requirements.txt entries, and shared component references.
 dependencies:
   tools:                                       # External libraries/tools required by stages
-    - name: "great_expectations"
-      version: ">=0.18.0"
-      used_by: [validate]                      # Which stages use this tool
-      description: "Data quality validation framework"
-    - name: "boto3"
-      version: ">=1.34.0"
-      used_by: [ingest]
-      description: "AWS S3 client for reading source files"
-    - name: "snowflake-connector-python"
-      version: ">=3.6.0"
-      used_by: [publish]
-      description: "Snowflake warehouse connector for publishing"
+    - name: "litellm"
+      version: ">=1.35.0"
+      used_by: [plan, generate]                # Which stages use this tool
+      description: "Unified LLM interface for model calls"
+    - name: "instructor"
+      version: ">=1.0.0"
+      used_by: [plan, generate]
+      description: "Structured output validation using Pydantic contracts"
+    - name: "dbt-core"
+      version: ">=1.7.0"
+      used_by: [dry_run]
+      description: "dbt engine for compiling and testing generated SQL models"
+    - name: "sqlglot"
+      version: ">=23.0.0"
+      used_by: [generate, dry_run]
+      description: "SQL parser and dialect transpiler for syntax verification"
   shared_components:                           # Components from the shared component catalog
-    - component_id: "s3_reader_v1"             # References component_registry in Tier 2 metadata
-      version: "1.3.0"
-      used_by: [ingest]
+    - component_id: "schema_inspector_v1"      # References component_registry in Tier 2 metadata
+      version: "1.1.0"
+      used_by: [discover]
       usage_type: "import"                     # import (use as-is), extend (subclass), wrap (adapter)
-      description: "Shared S3 ingestion component — multi-file and partition detection"
-    - component_id: "audit_logger_v1"
+      description: "Shared relational database schema discovery tool"
+    - component_id: "git_deliverer_v1"
       version: "1.0.0"
-      used_by: [validate, enrich, publish]
+      used_by: [deliver]
       usage_type: "import"
-      description: "Shared audit logging component — writes to metadata framework tables"
+      description: "Shared Git branch creator and PR publisher"
 
 # --- Metadata Integration -------------------------------------
 # Declares which metadata framework tiers and tables this agent
 # provisions and writes to during execution.
 metadata:
-  tier_3_schema: "ddlc_customer_pipeline_metadata"   # Tier 3 schema name (auto-provisioned by DCM engine)
-  tier_3_tables:                                      # Agent-specific tables needed
-    - "source_profiling_results"
-    - "reconciliation_log"
-  writes_to:                                          # Tier 1 and 2 tables this agent writes to via callbacks
-    tier_1: [agent_run_header, execution_log, artifact_registry, audit_log]
-    tier_2: [stage_execution, data_quality_summary, governance_audit]
+  tier_3_schema: "ddlc_dbt_builder_metadata"   # Tier 3 schema name (auto-provisioned by DCM engine)
+  tier_3_tables:                               # Agent-specific tables needed
+    - "generated_model_manifest"
+    - "compilation_diagnostics"
+  writes_to:                                   # Tier 1 and 2 tables this agent writes to via callbacks
+    tier_1: [agent_run_header, execution_log, artifact_registry, decision_log]
+    tier_2: [agent_registry, component_registry, contract_lineage]
 
 # --- Schedule -------------------------------------------------
 schedule:
-  type: "cron"                                 # cron, event_driven, manual, on_demand
-  expression: "0 2 * * *"                      # Daily at 2 AM UTC
-  timezone: "UTC"
-  description: "Runs daily at 2 AM UTC to process previous day's customer CSV drops"
+  type: "on_demand"                            # on_demand, event_driven, cron
+  description: "Triggered on-demand via Meta-Agent CLI or GitHub Webhook when source schema changes"
 ```
 
 **How the Builder reads `agent.yaml`:**
 
 | Field | Builder Action |
 |---|---|
-| `architecture.runtime` | Selects the generation strategy (LangGraph, Python pipeline, streaming) |
-| `architecture.pattern` | Informs project structure and boilerplate |
-| `pipeline.stages` | Generates the stage wiring — graph edges (LangGraph), function call sequence (pipeline), or handler registration (streaming) |
-| `pipeline.stages[].on_error` | Generates error routing branches |
+| `architecture.runtime` | Selects the generation strategy (`langgraph` or `python_litellm`) |
+| `architecture.pattern` | Informs project structure, state representation, and tool loops |
+| `pipeline.stages` | Generates stage wiring — graph edges & `interrupt()` gates (LangGraph), or sequential step dispatch (Python+LiteLLM) |
+| `pipeline.stages[].on_error` | Generates self-correction reflection edges and error routing branches |
+| `pipeline.stages[].transitions` | Generates multi-way conditional routing edges (e.g., human review gate approval, revision loops, or termination) |
 | `dependencies.tools` | Generates `requirements.txt` / `pyproject.toml` entries |
-| `dependencies.shared_components` | Generates import statements or adapter code |
-| `metadata.tier_3_schema` | Invokes DCM Schema Engine to compile and apply Tier 3 migrations |
+| `dependencies.shared_components` | Generates import statements or adapter code for shared tools |
+| `metadata.tier_3_schema` | Invokes DCM Schema Engine to compile and apply Tier 3 operational migrations |
 
 ---
 
 ### 4.2 Stage Documents — `stages/stage_<id>.yaml`
 
-Each stage document fully specifies one pipeline stage. It declares the stage's purpose, its inputs and outputs (as contract references), custom transformation hooks, tools, error handling strategies, and performance SLAs.
+Each stage document fully specifies one agent stage. It declares the stage's purpose, its inputs and outputs (as typed contract references), LLM reasoning parameters, agentic tool bindings, safety valves, and error handling strategies.
 
 #### Canonical Pydantic Schema (`StageDocument`)
 
@@ -351,68 +348,69 @@ from pydantic import BaseModel, Field
 class StageHeader(BaseModel):
     id: str = Field(..., description="Unique stage identifier matching pipeline.stages[].stage_id")
     name: str = Field(..., description="Human-readable display name for logging and telemetry")
-    type: Literal["ingestion", "validation", "transformation", "enrichment", "publication", "aggregation", "notification", "custom"]
+    type: Literal["discovery", "reasoning", "code_generation", "sandbox_testing", "human_review", "delivery", "custom"]
     description: str = Field(..., description="Plain English description of stage responsibility")
     autonomy: Literal["autonomous", "semi_autonomous", "human_required"] = "autonomous"
-    transform_handler: Optional[str] = Field(None, description="Hook for Leaf Coder custom imperative logic: handlers/<mod>.py::<func>")
 
 class StageInput(BaseModel):
     contract: Optional[str] = Field(None, description="Input contract reference in contracts/<name>.yaml")
-    source: Optional[Dict[str, Any]] = Field(None, description="Source connection details (ingestion stages)")
+    source: Optional[Dict[str, Any]] = Field(None, description="Source connection details (e.g. database, catalog)")
 
 class StageOutput(BaseModel):
     contract: Optional[str] = Field(None, description="Output contract reference in contracts/<name>.yaml")
-    destination: Optional[Dict[str, Any]] = Field(None, description="Destination connection details (publication stages)")
+    destination: Optional[Dict[str, Any]] = Field(None, description="Destination details (e.g. git repo, catalog)")
 
 class ToolConfig(BaseModel):
-    name: str
-    purpose: str
+    name: str = Field(..., description="Tool function identifier matching src/tools/ or dependencies")
+    type: Literal["builtin", "custom_code", "shared_component"] = Field(
+        default="builtin",
+        description="Tool implementation category: 'builtin' (standard framework SDK/library), 'custom_code' (synthesized by Leaf Coder), 'shared_component' (Tier 2 catalog component)"
+    )
+    handler: Optional[str] = Field(None, description="Hook for Leaf Coder custom Python tool: tools/<mod>.py::<func>")
+    signature: Optional[str] = Field(None, description="Explicit typed callable signature for Leaf Coder synthesis (e.g. '(sql: str, dialect: str) -> Tuple[bool, str]')")
+    purpose: str = Field(..., description="Plain English description of tool role for LLM function calling")
+    access: Literal["read_only", "side_effecting"] = "read_only"
+    requires_approval: bool = Field(default=False, description="Whether invocation requires human approval gate")
     configuration: Optional[Dict[str, Any]] = Field(default_factory=dict)
 
-class SharedComponentUsage(BaseModel):
-    name: str
-    usage_type: Literal["import", "extend", "wrap"] = "import"
-    configuration: Optional[Dict[str, Any]] = Field(default_factory=dict)
+class LLMConfig(BaseModel):
+    model_tier: Literal["speed", "reasoning", "heavy"] = "reasoning"
+    prompt_template_ref: Optional[str] = Field(
+        None,
+        description="Path to Jinja2 prompt template: prompts/<name>.jinja2. Enforces Universal Prompt Contract: {input, diagnostics, feedback, config}"
+    )
+    system_prompt: Optional[str] = Field(None, description="Direct system prompt if not using external Jinja2 file")
+    output_schema: Optional[str] = Field(None, description="Contract name in contracts/<name>.yaml enforced via Instructor")
+    temperature: float = Field(default=0.0, ge=0.0, le=1.0)
+    max_tokens: int = Field(default=4096)
+    cost_cap_usd: Optional[float] = Field(default=None, description="Maximum single-stage LLM spend ceiling")
+
+class SafetyValves(BaseModel):
+    max_tool_iterations: Optional[int] = Field(default=5, description="Maximum tool-calling loop iterations before escalation")
+    max_reflection_retries: Optional[int] = Field(default=3, description="Maximum self-correction retries on compilation/lint failure")
+    timeout_seconds: Optional[int] = Field(default=300, description="Stage timeout ceiling")
 
 class StageProcessing(BaseModel):
-    execution_mode: Literal["batch", "chunked", "row"] = Field(
-        default="batch", 
-        description="Execution paradigm: 'batch' (vectorized Polars/Pandas DataFrame), 'chunked' (bounded streaming generator), 'row' (single-record Pydantic)"
+    processing_type: Literal["llm_reasoning", "deterministic_tool", "human_gate"] = Field(
+        default="deterministic_tool",
+        description="Processing paradigm: 'llm_reasoning' (LLM inference with structured output), 'deterministic_tool' (pure Python/tool execution), 'human_gate' (interrupt for human review)"
     )
-    dataframe_engine: Optional[Literal["polars", "pandas"]] = Field(
-        default="polars", 
-        description="Vectorized DataFrame engine when execution_mode is 'batch'"
-    )
-    chunk_size: Optional[int] = Field(
-        default=None, 
-        description="Maximum record batch size in memory when execution_mode is 'chunked' (e.g. 10000)"
-    )
-    logic_description: Optional[str] = Field(None, description="Algorithmic description projected directly into Leaf Coder prompt")
-    tools: List[ToolConfig] = Field(default_factory=list)
-    shared_components: List[SharedComponentUsage] = Field(default_factory=list)
+    llm_config: Optional[LLMConfig] = Field(None, description="LLM reasoning configuration when processing_type is 'llm_reasoning'")
+    tools: List[ToolConfig] = Field(default_factory=list, description="Agentic tools bound to this stage")
+    safety_valves: Optional[SafetyValves] = Field(default_factory=SafetyValves)
+    logic_description: Optional[str] = Field(None, description="Bespoke logic description projected directly into Leaf Coder prompt")
 
 class ErrorScenario(BaseModel):
-    action: Literal["retry", "quarantine", "skip", "fail", "warn", "alert"]
+    action: Literal["retry", "fail", "skip", "escalate", "reflect"]
     max_retries: Optional[int] = 3
-    retry_delay_seconds: Optional[int] = 60
+    retry_delay_seconds: Optional[int] = 30
     escalation: Optional[str] = "fail"
-    quarantine_destination: Optional[str] = None
-    quarantine_table: Optional[str] = None
-    include_reason_codes: Optional[bool] = False
-    log_summary: Optional[bool] = True
-    proceed_with_valid: Optional[bool] = False
     log_level: Optional[str] = "INFO"
     details: Optional[str] = None
 
 class StagePerformance(BaseModel):
-    expected_record_count: Optional[Dict[str, Any]] = None
     expected_duration_seconds: Optional[int] = None
     timeout_seconds: Optional[int] = None
-
-class QualityGate(BaseModel):
-    metric: str
-    threshold: float
-    on_failure: Dict[str, Any]
 
 class StageDocument(BaseModel):
     """Canonical model for stages/stage_*.yaml validated before compilation."""
@@ -422,7 +420,6 @@ class StageDocument(BaseModel):
     processing: Optional[StageProcessing] = Field(default_factory=StageProcessing)
     error_strategy: Dict[str, ErrorScenario]
     performance: Optional[StagePerformance] = None
-    quality_gate: Optional[QualityGate] = None
 ```
 
 #### Stage Specification Fields Reference
@@ -431,236 +428,196 @@ class StageDocument(BaseModel):
 |---|---|---|---|
 | `stage.id` | string | Yes | Unique stage identifier. Must match `pipeline.stages[].stage_id` in `agent.yaml`. |
 | `stage.name` | string | Yes | Human-readable stage name for display and logging. |
-| `stage.type` | enum | Yes | Stage category informing code template selection: `ingestion`, `validation`, `transformation`, `enrichment`, `publication`, `aggregation`, `notification`, `custom`. |
+| `stage.type` | enum | Yes | Stage category informing code template selection: `discovery`, `reasoning`, `code_generation`, `sandbox_testing`, `human_review`, `delivery`, `custom`. |
 | `stage.description` | string | Yes | Plain English explanation of stage responsibility and business intent. |
 | `stage.autonomy` | enum | Yes | Autonomy level: `autonomous`, `semi_autonomous`, `human_required`. |
-| `stage.transform_handler` | string | Optional | Hook path (`"handlers/<mod>.py::<func>"`) dispatching execution to an isolated Python handler function synthesized by the **LLM Leaf Coder**. Used for bespoke imperative logic. |
-| `input.contract` | string | Required* | Reference to input contract in `contracts/`. (*Required for non-ingestion stages). |
-| `input.source` | object | Optional | Source connection details (for ingestion stages). |
-| `output.contract` | string | Required* | Reference to output contract in `contracts/`. (*Required for non-publication stages). |
-| `output.destination` | object | Optional | Destination connection details (for publication stages). |
-| `processing.execution_mode` | enum | Yes | Execution paradigm: `batch` (vectorized Polars/Pandas DataFrame), `chunked` (bounded memory generator batches), `row` (single Pydantic record; default for streaming). |
-| `processing.dataframe_engine` | enum | Optional | Vectorized DataFrame engine when `execution_mode: batch`. Default: `polars` (Apache Arrow native); fallback: `pandas`. |
-| `processing.chunk_size` | integer | Optional | Maximum memory batch size when `execution_mode: chunked` (e.g., `10000`). Binds peak RAM to $O(\text{chunk\_size})$. |
-| `processing.logic_description` | string | Conditional | Algorithmic, step-by-step description of transformations and rules. **Required** when `transform_handler` is declared; projected directly into the Leaf Coder's prompt. |
-| `processing.tools` | list | Optional | Tools and libraries invoked within this stage. |
-| `processing.shared_components` | list | Optional | Reusable shared components referenced by the stage. |
-| `error_strategy` | object | Yes | Handlers for failure scenarios (`action`: retry, quarantine, skip, fail, warn, alert). |
-| `performance` | object | Optional | Operational SLA expectations (`expected_record_count`, `expected_duration_seconds`, `timeout_seconds`). |
-| `quality_gate` | object | Optional | Stage-level gate based on aggregate quality metrics (`metric`, `threshold`, `on_failure`). |
+| `input.contract` | string | Required* | Reference to input contract in `contracts/`. (*Required for non-initial stages). |
+| `input.source` | object | Optional | Source connection details (e.g., database, catalog, API). |
+| `output.contract` | string | Required* | Reference to output contract in `contracts/`. (*Required for non-terminal stages). |
+| `output.destination` | object | Optional | Destination connection details (e.g., Git repository, catalog). |
+| `processing.processing_type` | enum | Yes | Processing mechanism: `llm_reasoning` (LLM inference with structured output), `deterministic_tool` (pure Python/tool execution), `human_gate` (interrupt for human review). |
+| `processing.llm_config` | object | Conditional | LLM configuration (`model_tier`, `prompt_template_ref`, `output_schema`, `temperature`, `max_tokens`). Required when `processing_type: llm_reasoning`. Prompt templates strictly adhere to the Universal Prompt Contract (`input`, `diagnostics`, `feedback`, `config`). |
+| `processing.tools` | list | Optional | Agentic or verification tools bound to this stage. |
+| `processing.tools[].name` | string | Yes | Unique tool function identifier. |
+| `processing.tools[].type` | enum | Yes | `builtin` (SDK/standard library), `custom_code` (synthesized by Leaf Coder), `shared_component` (Tier 2 catalog component). |
+| `processing.tools[].handler` | string | Conditional | Hook path (`"tools/<mod>.py::<func>"`) dispatching execution to an isolated Python tool synthesized by the **LLM Leaf Coder** when `type: custom_code`. |
+| `processing.tools[].signature` | string | Conditional | Explicit typed callable signature (e.g. `(sql_content: str, dialect: str) -> Tuple[bool, str]`) used for Leaf Coder code synthesis and test generation. |
+| `processing.tools[].access` | enum | Yes | `read_only` or `side_effecting`. |
+| `processing.tools[].requires_approval` | boolean | No | Whether invoking tool triggers human approval gate (default: false). |
+| `processing.safety_valves` | object | Optional | Safety limits: `max_tool_iterations`, `max_reflection_retries`, `timeout_seconds`. |
+| `processing.logic_description` | string | Conditional | Algorithmic, step-by-step description of transformations and rules. Projected directly into the Leaf Coder's prompt when synthesizing bespoke tools or prompts. |
+| `error_strategy` | object | Yes | Handlers for failure scenarios (`action`: retry, fail, skip, escalate, reflect). |
+| `performance` | object | Optional | Operational SLA expectations (`expected_duration_seconds`, `timeout_seconds`). |
 
 ```yaml
 # ============================================================
-# stages/stage_ingest.yaml — Ingestion Stage Specification
+# stages/stage_discover.yaml — Schema Discovery Stage
 # ============================================================
-# Fully specifies the ingestion stage of the Customer Data
-# Pipeline. The Builder reads this to generate the stage's
-# code, telemetry, and error handling.
-# Top-level sections: stage, input, output, processing, error_strategy, performance.
-# ============================================================
-
-stage:
-  id: ingest                                    # Unique stage identifier. Must match pipeline.stages[].stage_id in agent.yaml.
-  name: "Ingest Customer CSV"                   # Human-readable stage name.
-  type: ingestion                               # Stage type category. Informs Builder's code template selection.
-                                                # Valid types: ingestion, validation, transformation, enrichment,
-                                                # publication, aggregation, notification, custom
-  description: >
-    Pulls daily CSV files from the S3 raw data bucket.
-    Handles schema evolution by detecting new columns and logging
-    them as warnings rather than failing. Supports both single-file
-    and multi-file ingestion (daily partitioned directories).
-    Empty file drops are treated as no-ops with an info log, not errors.
-  autonomy: autonomous                          # autonomous, semi_autonomous, human_required
-
-input:
-  source:
-    type: "s3"                                # Source system type. Builder generates the appropriate reader.
-    uri: "${config.sources.customer_csv.uri}" # Externalized — references config.yaml. NEVER hardcoded.
-    format: "csv"                             # File format: csv, parquet, json, jsonl, avro
-    options:
-      delimiter: ","
-      header: true
-      encoding: "utf-8"
-      quote_char: '"'
-      null_values: ["", "NULL", "N/A"]
-  contract: customer_raw                      # References contracts/customer_raw.yaml.
-
-output:
-  destination:
-    type: "database"                          # Destination system type.
-    uri: "${config.destinations.staging.uri}" # Externalized connection string
-    table: "staging.customer_raw"             # Target table name
-    write_mode: "append"                      # Valid: append, overwrite, upsert, merge
-  contract: customer_raw                      # Output conforms to customer_raw contract.
-
-processing:
-  tools:
-    - name: "boto3"
-      purpose: "Read CSV files from S3 bucket"
-      configuration:
-        region: "${config.aws.region}"
-        assume_role: "${config.aws.s3_read_role_arn}"
-
-error_strategy:
-  on_source_unavailable:
-    action: retry                             # Valid actions: retry, fail, skip, quarantine, alert
-    max_retries: 3
-    retry_delay_seconds: 60
-    escalation: fail                          # What happens after retries exhausted
-  on_schema_evolution:
-    action: warn                              # Log new columns, don't fail
-    log_level: "WARNING"
-    details: "New columns detected in source file — logged for review"
-  on_empty_source:
-    action: skip                              # No data is not an error
-    log_level: "INFO"
-    details: "Empty file drop detected — no records to process"
-  on_parse_error:
-    action: quarantine                        # Unparseable rows go to quarantine
-    quarantine_destination: "${config.destinations.quarantine.uri}"
-    quarantine_table: "staging.customer_parse_errors"
-    log_summary: true
-
-performance:
-  expected_record_count:
-    min: 0                                    # Empty drops are valid
-    max: 500000                               # Alert if exceeds this — possible duplicate drop
-    alert_on_exceed: true
-  expected_duration_seconds: 300               # 5-minute SLA for ingestion
-  timeout_seconds: 600                         # Hard timeout — kill after 10 minutes
-```
-
-**A second stage example — validation with quality gate and shared audit component:**
-
-```yaml
-# ============================================================
-# stages/stage_validate.yaml — Validation Stage Specification
+# Fully specifies the discovery stage of the dbt Pipeline
+# Builder Agent. The Builder reads this to generate the stage's
+# tool binding, contract validation, and execution wrapper.
 # ============================================================
 
 stage:
-  id: validate
-  name: "Validate Customer Data Quality"
-  type: validation
+  id: discover
+  name: "Discover Source Schemas"
+  type: discovery
   description: >
-    Validates ingested customer records against data quality rules
-    defined in the customer_raw contract. Records that fail any rule
-    are quarantined with reason codes. A quality summary is logged
-    to the data_quality_summary metadata table. The stage proceeds
-    with valid records only — it never blocks the pipeline on
-    individual record failures.
+    Connects to the source PostgreSQL OLTP database, inspects the
+    specified schema, and produces a structured profile containing
+    table definitions, column data types, nullability, and primary keys.
   autonomy: autonomous
 
 input:
   source:
     type: "database"
-    uri: "${config.destinations.staging.uri}"
-    table: "staging.customer_raw"
-  contract: customer_raw                      # Contract defining the quality rules to check
+    uri: "${config.sources.postgres_oltp.uri}"
+    schema: "public"
 
 output:
-  destination:
-    type: "database"
-    uri: "${config.destinations.staging.uri}"
-    table: "staging.customer_validated"
-    write_mode: overwrite                     # Each run replaces validated records
-  contract: customer_validated                # Output conforms to stricter validated contract
+  contract: source_schema_profile               # References contracts/source_schema_profile.yaml
 
 processing:
+  processing_type: deterministic_tool
   tools:
-    - name: "great_expectations"
-      purpose: "Execute data quality validation suite"
+    - name: "schema_inspector_v1"
+      type: shared_component
+      purpose: "Introspect database catalog tables via shared Tier 2 component"
+      access: read_only
       configuration:
-        data_context_root: "${config.tools.great_expectations.context_root}"
-        checkpoint_name: "customer_raw_quality"
-  shared_components:
-    - name: "audit_logger_v1"
-      usage_type: "import"
+        include_views: false
+        sample_rows_for_stats: 100
+
+error_strategy:
+  on_connection_error:
+    action: retry
+    max_retries: 3
+    retry_delay_seconds: 30
+    escalation: fail
+  on_schema_not_found:
+    action: fail
+    details: "Target schema does not exist in source database"
+
+performance:
+  expected_duration_seconds: 15
+  timeout_seconds: 60
+```
+
+**A second stage example — LLM reasoning stage planning transformations:**
+
+```yaml
+# ============================================================
+# stages/stage_plan.yaml — Transformation Planning Stage
+# ============================================================
+
+stage:
+  id: plan
+  name: "Plan dbt Transformation Architecture"
+  type: reasoning
+  description: >
+    Analyzes the discovered source schema profile and corporate dbt
+    modeling guidelines to design a staging and marts transformation
+    layer. Produces a formal transformation plan declaring model names,
+    materializations, dependencies, and business logic intent.
+  autonomy: autonomous
+
+input:
+  contract: source_schema_profile
+
+output:
+  contract: transformation_plan                 # References contracts/transformation_plan.yaml
+
+processing:
+  processing_type: llm_reasoning
+  llm_config:
+    model_tier: "reasoning"                     # High-reasoning model tier (e.g. Claude 3.5 Sonnet / Gemini Pro)
+    prompt_template_ref: "prompts/stage_plan.jinja2"
+    output_schema: "transformation_plan"        # Instructor validates LLM output against this Pydantic contract
+    temperature: 0.1
+    max_tokens: 4096
+    cost_cap_usd: 0.25
+  tools:
+    - name: "query_tier2_catalog"
+      purpose: "Check existing corporate dbt models and naming conventions in Tier 2 metadata"
+      access: read_only
+  safety_valves:
+    max_tool_iterations: 3
+    timeout_seconds: 120
 
 error_strategy:
   on_validation_failure:
-    action: quarantine
-    quarantine_destination: "${config.destinations.quarantine.uri}"
-    quarantine_table: "staging.customer_quarantine"
-    include_reason_codes: true                # Each quarantined row gets failure details
-    log_summary: true
-    proceed_with_valid: true                  # Pipeline continues with clean data
-  on_tool_error:
-    action: fail
-    details: "Great Expectations runtime failure — cannot validate data"
+    action: retry
+    max_retries: 2
+    details: "Instructor schema validation failed — retry with error feedback in prompt"
+  on_cost_cap_exceeded:
+    action: escalate
+    details: "LLM token spend exceeded stage budget"
 
 performance:
-  expected_record_count:
-    min: 0
-    max: 500000
-  expected_duration_seconds: 120
-  timeout_seconds: 300
-
-# Stage-level quality gate evaluated against batch metrics
-quality_gate:
-  metric: "quality_score"                     # Computed as: valid_records / total_records
-  threshold: 0.95                             # 95% of records must pass validation
-  on_failure:
-    action: fail                              # Fail the stage if quality is below threshold
-    alert: true
-    alert_channel: "${config.alerts.channel}"
+  expected_duration_seconds: 30
+  timeout_seconds: 120
 ```
 
-**A third stage example — bespoke transformation with Leaf Coder hook (`transform_handler` and `processing.logic_description`):**
+**A third stage example — code generation with Leaf Coder verifier hook:**
 
 ```yaml
 # ============================================================
-# stages/stage_enrich.yaml — Custom Enrichment Stage Specification
-# ============================================================
-# Specifies custom imperative transformation logic. Because this stage
-# declares a transform_handler and processing.logic_description, the
-# Builder's Deterministic Scaffold Compiler emits the graph wiring and
-# invokes the LLM Leaf Coder to synthesize the editable handler in
-# src/handlers/enrich_customer.py and unit tests in tests/unit/.
+# stages/stage_generate.yaml — dbt Code Generation Stage
 # ============================================================
 
 stage:
-  id: enrich
-  name: "Enrich Customer Tier"
-  type: transformation
-  transform_handler: "handlers/enrich_customer.py::compute_tiers"
+  id: generate
+  name: "Generate dbt Models and Schema YAML"
+  type: code_generation
   description: >
-    Enriches validated customer records with loyalty tiers and calculation_timestamp.
-    Uses bespoke scoring logic based on credit scores and lifetime spend.
+    Synthesizes production-ready dbt SQL models, schema.yml files with
+    generic tests (unique, not_null), and sources.yml definitions.
+    Emits a complete dbt artifact bundle verified against SQLGlot AST parser.
   autonomy: autonomous
 
 input:
-  contract: customer_validated
+  contract: transformation_plan
 
 output:
-  contract: customer_enriched
+  contract: dbt_artifact_bundle                 # References contracts/dbt_artifact_bundle.yaml
 
 processing:
-  execution_mode: batch
-  dataframe_engine: polars
+  processing_type: llm_reasoning
+  llm_config:
+    model_tier: "reasoning"
+    prompt_template_ref: "prompts/stage_generate.jinja2"
+    output_schema: "GeneratedFileSet"           # Instructor emits structured file models; node stages to disk & emits dbt_artifact_bundle
+    temperature: 0.0
+    max_tokens: 8192
+    cost_cap_usd: 0.50
+  tools:
+    - name: "validate_sql_ast"
+      type: "custom_code"
+      handler: "tools/sqlglot_verifier.py::validate_sql_ast"
+      signature: "(sql_content: str, dialect: str) -> Tuple[bool, str]"
+      purpose: "Verify SQL syntax and dialect compatibility prior to emission"
+      access: read_only
+  safety_valves:
+    max_reflection_retries: 3                   # Self-correction loop: reflection on SQL syntax error
+    timeout_seconds: 180
   logic_description: >
-    Calculate loyalty tier based on credit_score and historical purchases:
-    - Tier Platinum: credit_score >= 750 AND lifetime_spend > 10000
-    - Tier Gold: credit_score >= 700 OR lifetime_spend > 5000
-    - Tier Silver: All other active customers
-    Add calculation_timestamp as current UTC time.
+    Generate modular dbt SQL files for each model in transformation_plan:
+    - Staging models: select from source, rename to snake_case, cast types explicitly
+    - Mart models: join staging models, compute derived metrics, apply business rules
+    - schema.yml: attach unique and not_null tests to primary keys; description for each column
+    - sources.yml: declare freshness SLA and database/schema identifiers
 
 error_strategy:
-  on_calculation_error:
-    action: quarantine
-    quarantine_destination: "${config.destinations.quarantine.uri}"
-    quarantine_table: "staging.customer_enrichment_errors"
-    log_summary: true
-    proceed_with_valid: true
-  on_missing_fields:
+  on_syntax_error:
+    action: reflect                             # Loops back to LLM with SQLGlot diagnostic error
+    max_retries: 3
+    escalation: fail
+  on_generation_failure:
     action: fail
-    details: "Required credit_score or lifetime_spend missing from validated contract"
+    details: "Failed to generate valid dbt artifact bundle"
 
 performance:
-  expected_record_count:
-    min: 0
-    max: 500000
-  expected_duration_seconds: 60
+  expected_duration_seconds: 45
   timeout_seconds: 180
 ```
 
@@ -668,248 +625,222 @@ performance:
 
 ### 4.3 Contract Documents — `contracts/<name>.yaml`
 
-Contract documents define the exact schema of data flowing between stages. They are the **most critical** documents in the set — every field, every type, every quality rule, every SLA is specified here. The Builder generates Pydantic models, schema validators, and test suites from contracts. The DCM Schema Engine compiles contracts into database DDL.
+Contract documents define the exact schema of data, agent state, and engineering artifacts flowing between stages. In Layer 2 DDLC AI agents, contracts define structured intermediate representations (such as schema profiles, transformation plans, generated dbt bundles, and compilation reports), compiling deterministically into Pydantic v2 / Instructor data models.
 
 ```yaml
 # ============================================================
-# contracts/customer_raw.yaml — Customer Raw Data Contract
+# contracts/source_schema_profile.yaml — Discovered Source Schema
 # ============================================================
-# Defines the schema and quality expectations for raw customer
-# data as it enters the pipeline from S3. This contract is
-# referenced by the ingest and validate stages.
-# ============================================================
-
-contract:
-  name: customer_raw                            # Unique contract name. Referenced by stages via input_contract/output_contract.
-  version: "1.0.0"                              # Contract version. Changes here trigger downstream impact analysis.
-  description: >
-    Schema definition for raw customer records as ingested from
-    daily S3 CSV drops. Represents the data BEFORE validation
-    and warehouse publication. Fields match the source system's export format.
-  direction: internal                           # Valid: input (external source), output (external sink), internal (between stages)
-  owner: "data-engineering-team"
-  classification: "confidential"                # Platform data classification: public, internal, confidential, restricted
-  tags: ["crm", "customer_profile"]
-
-  # --- Field Definitions --------------------------------------
-  # Every field the contract covers. No field may exist in the data
-  # that is not declared here (strict schema enforcement).
-  fields:
-    - name: customer_id
-      type: string                              # Logical type. Builder maps to language-specific types.
-                                                # Valid types: string, integer, float, decimal, boolean,
-                                                # date, datetime, timestamp, uuid, json, array, map
-      nullable: false                           # Whether null/missing values are permitted.
-      description: "Unique customer identifier from the source CRM system. Format: CUS-XXXXXXXX."
-      primary_key: true                         # Indicates this field is the primary identifier for dedup and lookup.
-      quality_rules:
-        - rule: regex
-          pattern: "^CUS-[A-Z0-9]{8}$"
-          severity: error                       # error = quarantine the record. warning = log and continue.
-          message: "customer_id must match format CUS-XXXXXXXX"
-        - rule: uniqueness
-          scope: batch                          # unique within this batch (not globally)
-          severity: error
-          message: "Duplicate customer_id detected within batch"
-
-    - name: first_name
-      type: string
-      nullable: false
-      description: "Customer's first name as recorded in CRM."
-      max_length: 100
-      quality_rules:
-        - rule: not_empty
-          severity: error
-          message: "first_name must not be an empty string"
-
-    - name: last_name
-      type: string
-      nullable: false
-      description: "Customer's last name as recorded in CRM."
-      max_length: 100
-      quality_rules:
-        - rule: not_empty
-          severity: error
-          message: "last_name must not be an empty string"
-
-    - name: email
-      type: string
-      nullable: false
-      description: "Customer's primary email address. PII field — will be masked in downstream stages."
-      pii: true                                 # Marks this field as containing personally identifiable information.
-      pii_category: "email_address"             # PII classification. Governance rules use this for masking strategy selection.
-      max_length: 320
-      quality_rules:
-        - rule: regex
-          pattern: "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"
-          severity: error
-          message: "email must be a valid email address format"
-
-    - name: phone
-      type: string
-      nullable: true                            # Phone is optional in the source system
-      description: "Customer's primary phone number. PII field — will be masked downstream."
-      pii: true
-      pii_category: "phone_number"
-      max_length: 20
-      quality_rules:
-        - rule: regex
-          pattern: "^\\+?[1-9]\\d{1,14}$"
-          severity: warning                     # Invalid phone format is a warning, not an error
-          message: "phone should match E.164 format"
-
-    - name: lifetime_spend
-      type: float
-      nullable: false
-      default: 0.0
-      description: "Customer total historical spend in USD. Used for customer loyalty tiering."
-      quality_rules:
-        - rule: range
-          min: 0.0
-          severity: error
-          message: "lifetime_spend must be non-negative"
-
-    - name: signup_date
-      type: date
-      nullable: false
-      description: "Date the customer signed up. Used for cohort analysis."
-      quality_rules:
-        - rule: range
-          min: "2020-01-01"                     # Business rule: no records before system launch
-          max: "${today}"                       # Dynamic — evaluated at runtime
-          severity: error
-          message: "signup_date must be between 2020-01-01 and today"
-
-    - name: account_status
-      type: string
-      nullable: false
-      description: "Current account status in the CRM system."
-      quality_rules:
-        - rule: allowed_values
-          values: ["active", "inactive", "suspended", "closed"]
-          severity: error
-          message: "account_status must be one of: active, inactive, suspended, closed"
-
-    - name: annual_revenue
-      type: decimal
-      nullable: true
-      description: "Customer's reported annual revenue in USD. Used for tiering."
-      precision: 15
-      scale: 2
-      quality_rules:
-        - rule: range
-          min: 0
-          max: 999999999999.99
-          severity: error
-          message: "annual_revenue must be non-negative and within reasonable bounds"
-
-    - name: created_at
-      type: timestamp
-      nullable: false
-      description: "Timestamp when this record was created in the source system. Used for freshness checks."
-      quality_rules:
-        - rule: freshness
-          max_age_hours: 48                     # Records older than 48 hours trigger a warning
-          severity: warning
-          message: "Record is older than 48 hours — may indicate a stale source"
-
-  # --- Aggregate Quality Rules --------------------------------
-  # Rules that apply to the entire dataset, not individual records.
-  aggregate_rules:
-    - rule: completeness
-      description: "At least 99% of records must have non-null email"
-      field: email
-      threshold: 0.99
-      severity: error
-
-    - rule: volume
-      description: "Daily batch should contain between 100 and 500,000 records"
-      min_records: 100
-      max_records: 500000
-      severity: warning
-
-  # --- SLA Definitions ----------------------------------------
-  # Service-level agreements for this contract's data.
-  sla:
-    freshness:
-      max_age_hours: 24                         # Data must be no older than 24 hours at point of consumption
-      description: "Consumer systems expect data refreshed within 24 hours"
-    availability:
-      uptime_percent: 99.5                      # The pipeline producing this data must be available 99.5% of the time
-      description: "Daily pipeline availability target"
-    latency:
-      max_processing_seconds: 600               # End-to-end processing time from ingestion to publication
-      description: "Total pipeline latency SLA from S3 read to warehouse write"
-
-  # --- Schema Evolution Rules ---------------------------------
-  schema_evolution:
-    allow_new_fields: true                      # New columns in source are logged as warnings, not errors
-    allow_field_removal: false                  # Removed columns are errors — must be explicitly handled
-    allow_type_changes: false                   # Type changes are errors — require contract version bump
-```
-
-**A second contract — the validated output with additional derived fields:**
-
-```yaml
-# ============================================================
-# contracts/customer_validated.yaml — Validated Customer Contract
+# Defines the structured profile of the source database catalog
+# extracted by the discover stage and consumed by the plan stage.
 # ============================================================
 
 contract:
-  name: customer_validated
+  name: source_schema_profile
   version: "1.0.0"
   description: >
-    Schema for customer records that have passed all quality
-    validation rules. Contains the same fields as customer_raw (including
-    lifetime_spend) plus validation metadata. PII fields are retained and
-    classified for downstream warehouse masking policies.
+    Catalog metadata and column-level schemas discovered from the
+    source relational database. Consumed by the planning stage.
   direction: internal
-  owner: "data-engineering-team"
+  owner: "analytics-engineering-team"
+  classification: "internal"
+  tags: ["metadata", "discovery", "catalog"]
 
-  # Inherits all fields from customer_raw and adds validation metadata
-  extends: customer_raw                         # Contract inheritance — all fields from customer_raw are included
-  
-  additional_fields:
-    - name: validation_timestamp
-      type: timestamp
-      nullable: false
-      description: "When this record was validated."
-      default: "${now}"
-
-    - name: validation_status
+  fields:
+    - name: database_name
       type: string
       nullable: false
-      description: "Outcome of validation for this record."
+      description: "Source database identifier"
       quality_rules:
-        - rule: allowed_values
-          values: ["passed"]                    # Only passed records exist in this contract
+        - rule: not_empty
           severity: error
+          message: "database_name must not be empty"
 
-    - name: quality_score
-      type: float
+    - name: schema_name
+      type: string
       nullable: false
-      description: "Aggregate quality score for this record (0.0–1.0). Based on number of rules passed."
-      quality_rules:
-        - rule: range
-          min: 0.0
-          max: 1.0
-          severity: error
+      description: "Schema namespace introspected (e.g., public, core)"
 
-  # Override aggregate rules for the validated output
-  aggregate_rules:
-    - rule: completeness
-      description: "All records in validated output must have non-null email (100%)"
-      field: email
-      threshold: 1.0
-      severity: error
+    - name: tables
+      type: array
+      nullable: false
+      description: "List of discovered table profiles with column schemas, primary keys, and row counts"
+
+    - name: discovery_timestamp
+      type: timestamp
+      nullable: false
+      default: "${now}"
+      description: "Timestamp when schema discovery was executed"
 
   sla:
-    freshness:
-      max_age_hours: 24
-    availability:
-      uptime_percent: 99.5
     latency:
-      max_processing_seconds: 600
+      max_processing_seconds: 60
+      description: "Schema introspection SLA"
+```
+
+**A second contract — the transformation plan emitted by LLM reasoning:**
+
+```yaml
+# ============================================================
+# contracts/transformation_plan.yaml — dbt Architecture Plan
+# ============================================================
+# Defines the transformation architecture designed by the LLM
+# planner. Emitted by the plan stage and consumed by generate.
+# ============================================================
+
+contract:
+  name: transformation_plan
+  version: "1.0.0"
+  description: >
+    Structured dbt architecture plan specifying staging and marts models,
+    dependencies, materializations, column transformations, and tests.
+  direction: internal
+  owner: "analytics-engineering-team"
+  classification: "internal"
+  tags: ["dbt", "architecture", "plan"]
+
+  fields:
+    - name: project_name
+      type: string
+      nullable: false
+      description: "Target dbt project identifier"
+
+    - name: target_dialect
+      type: string
+      nullable: false
+      description: "Target SQL dialect (e.g., snowflake, postgres, bigquery)"
+      quality_rules:
+        - rule: allowed_values
+          values: ["snowflake", "postgres", "bigquery", "databricks"]
+          severity: error
+
+    - name: staging_models
+      type: array
+      nullable: false
+      description: "List of staging models mapping source tables with 1:1 clean views"
+      items:
+        type: object
+        model_name: "StagingModelSpec"
+        description: "Specification for a dbt staging model"
+        fields:
+          - name: model_name
+            type: string
+            nullable: false
+            description: "Staging model identifier (e.g., stg_customers)"
+          - name: source_table
+            type: string
+            nullable: false
+            description: "Source table identifier"
+          - name: columns
+            type: array
+            nullable: false
+            items:
+              type: string
+            description: "Projected column list"
+
+    - name: marts_models
+      type: array
+      nullable: false
+      description: "List of dimensional/fact mart models joining staging sources"
+      items:
+        type: object
+        model_name: "MartModelSpec"
+        description: "Specification for a dbt dimensional or fact mart model"
+        fields:
+          - name: model_name
+            type: string
+            nullable: false
+            description: "Mart model identifier (e.g., fct_orders)"
+          - name: materialization
+            type: string
+            nullable: false
+            default: "table"
+            description: "dbt materialization strategy"
+            quality_rules:
+              - rule: allowed_values
+                values: ["table", "view", "incremental"]
+                severity: error
+          - name: description
+            type: string
+            nullable: false
+            description: "Business documentation for the mart model"
+          - name: staging_dependencies
+            type: array
+            nullable: false
+            items:
+              type: string
+            description: "Upstream staging models referenced"
+
+    - name: total_models_planned
+      type: integer
+      nullable: false
+      description: "Count of models planned for synthesis"
+      quality_rules:
+        - rule: range
+          min: 1
+          max: 100
+          severity: error
+
+  sla:
+    latency:
+      max_processing_seconds: 120
+      description: "Planning reasoning SLA"
+```
+
+**A third contract — synthesized dbt artifact bundle (Claim Check pattern):**
+
+```yaml
+# ============================================================
+# contracts/dbt_artifact_bundle.yaml — Synthesized Artifacts
+# ============================================================
+# Carries Claim Check pointers to the generated code files
+# (SQL models, schema.yml, sources.yml) stored in the workspace.
+# ============================================================
+
+contract:
+  name: dbt_artifact_bundle
+  version: "1.0.0"
+  description: >
+    Complete set of synthesized dbt artifacts including SQL model files,
+    schema documentation, test assertions, and source configs.
+  direction: internal
+  storage_mode: claim_check                     # inline | claim_check (externalize large multi-file bundles)
+  owner: "analytics-engineering-team"
+  classification: "internal"
+  tags: ["dbt", "code_artifacts"]
+
+  fields:
+    - name: bundle_id
+      type: string
+      nullable: false
+      description: "Unique UUID identifying this artifact release bundle"
+
+    - name: storage_uri
+      type: string
+      nullable: false
+      description: "Filesystem path or cloud storage URI where generated dbt files are staged"
+
+    - name: file_manifest
+      type: array
+      nullable: false
+      items:
+        type: string
+      description: "List of relative file paths in the bundle (e.g., models/staging/stg_customers.sql)"
+
+    - name: artifact_sha256
+      type: string
+      nullable: false
+      description: "Cryptographic SHA-256 hash of the artifact bundle for tamper-proof verification"
+      quality_rules:
+        - rule: regex
+          pattern: "^[a-f0-9]{64}$"
+          severity: error
+
+    - name: generated_at
+      type: timestamp
+      nullable: false
+      default: "${now}"
+      description: "Generation timestamp"
 ```
 
 ---
@@ -929,31 +860,28 @@ The configuration document declares every externalized value the agent needs. No
 # ============================================================
 
 config:
-  # --- Environment Defaults ------------------------------------
-  # Base configuration values. Overridden per environment below.
   defaults:
     sources:
-      customer_csv:
-        uri: "s3://data-lake-prod/raw/customers/"
-        file_pattern: "customers_*.csv"
+      postgres_oltp:
+        uri: "postgresql://${secrets.source_db_user}:${secrets.source_db_password}@${secrets.source_db_host}:5432/app_production"
+        schema: "public"
 
     destinations:
-      staging:
-        uri: "postgresql://${secrets.staging_db_user}:${secrets.staging_db_password}@${secrets.staging_db_host}:5432/staging"
-      quarantine:
-        uri: "postgresql://${secrets.staging_db_user}:${secrets.staging_db_password}@${secrets.staging_db_host}:5432/staging"
-      warehouse:
-        uri: "snowflake://${secrets.snowflake_account}/${secrets.snowflake_database}"
-        schema: "analytics"
-        warehouse: "ETL_WH"
+      git:
+        repository_url: "https://github.com/org/analytics-dbt-core.git"
+        target_branch: "feature/automated-source-onboarding"
+        base_branch: "main"
 
-    aws:
-      region: "us-east-1"
-      s3_read_role_arn: "${secrets.s3_read_role_arn}"
+    dbt:
+      sandbox_project_dir: "/tmp/dbt_sandbox"
+      target_profile: "dev"
 
-    tools:
-      great_expectations:
-        context_root: "./great_expectations"
+    llm:
+      default_provider: "anthropic"
+      model_tiers:
+        speed: "claude-3-haiku-20240307"
+        reasoning: "claude-3-5-sonnet-20241022"
+        heavy: "claude-3-opus-20240229"
 
     alerts:
       channel: "${secrets.slack_webhook_url}"
@@ -963,63 +891,47 @@ config:
       format: "json"
 
     performance:
-      global_timeout_seconds: 3600              # 1-hour hard timeout for entire pipeline
+      global_timeout_seconds: 900              # 15-minute global timeout for complete build agent run
 
-  # --- Environment Overrides ----------------------------------
-  # Override specific values per deployment environment.
-  # Only changed values need to be specified — defaults apply for the rest.
   environments:
     development:
       sources:
-        customer_csv:
-          uri: "s3://data-lake-dev/raw/customers/"
-      destinations:
-        staging:
-          uri: "postgresql://localhost:5432/staging_dev"
-        quarantine:
-          uri: "postgresql://localhost:5432/staging_dev"
+        postgres_oltp:
+          uri: "postgresql://localhost:5432/app_dev"
+      dbt:
+        sandbox_project_dir: "./sandbox/dbt_dev"
       logging:
         level: "DEBUG"
       performance:
-        global_timeout_seconds: 600
+        global_timeout_seconds: 300
 
     staging:
       sources:
-        customer_csv:
-          uri: "s3://data-lake-staging/raw/customers/"
-      destinations:
-        staging:
-          uri: "postgresql://${secrets.staging_db_user}:${secrets.staging_db_password}@staging-db.internal:5432/staging"
+        postgres_oltp:
+          uri: "postgresql://${secrets.source_db_user}:${secrets.source_db_password}@staging-db.internal:5432/app_staging"
 
     production:
-      # Production uses all defaults — no overrides needed
+      # Uses defaults
 
-  # --- Secret References --------------------------------------
-  # Documents which secrets the agent needs, for operators
-  # provisioning the secrets manager. NEVER contains actual values.
   secrets:
-    - name: staging_db_user
-      description: "Postgres staging database username"
+    - name: source_db_user
+      description: "Postgres OLTP database read-only username"
       required: true
-    - name: staging_db_password
-      description: "Postgres staging database password"
+    - name: source_db_password
+      description: "Postgres OLTP database password"
       required: true
-    - name: staging_db_host
-      description: "Postgres staging database hostname"
+    - name: source_db_host
+      description: "Postgres OLTP database hostname"
       required: true
-    - name: snowflake_account
-      description: "Snowflake account identifier"
+    - name: github_token
+      description: "GitHub personal access token for opening PRs and pushing branches"
       required: true
-    - name: snowflake_database
-      description: "Snowflake target database name"
-      required: true
-    - name: s3_read_role_arn
-      description: "AWS IAM role ARN for S3 read access"
+    - name: anthropic_api_key
+      description: "API key for LiteLLM Anthropic provider"
       required: true
     - name: slack_webhook_url
-      description: "Slack webhook URL for general alerts"
+      description: "Slack webhook URL for notifications and human gate alerts"
       required: false
-
 ```
 
 ---
@@ -1037,82 +949,53 @@ The test document declares test cases that the Builder generates into executable
 # ============================================================
 
 tests:
-  # --- Contract-Derived Tests ---------------------------------
-  # Auto-generated from contract field definitions and quality rules.
-  # The Builder reads the contracts and generates test cases for
-  # every field and every quality rule.
   contract_tests:
-    - contract: customer_raw
-      description: "Tests derived from the customer_raw contract"
+    - contract: source_schema_profile
+      description: "Tests derived from source_schema_profile contract"
       cases:
-        - test_id: "customer_raw_schema_valid"
+        - test_id: "profile_schema_valid"
           type: schema_validation
-          description: "Verify all required fields are present with correct types"
+          description: "Verify all required catalog fields are present"
           auto_generate: true
 
-        - test_id: "customer_raw_customer_id_format"
-          type: field_quality
-          description: "Verify customer_id matches CUS-XXXXXXXX format"
-          field: customer_id
-          rule: regex
-          auto_generate: true
-
-        - test_id: "customer_raw_email_format"
-          type: field_quality
-          description: "Verify email matches valid email format"
-          field: email
-          rule: regex
-          auto_generate: true
-
-        - test_id: "customer_raw_completeness"
-          type: aggregate_quality
-          description: "Verify at least 99% of records have non-null email"
-          auto_generate: true
-
-    - contract: customer_validated
-      description: "Tests derived from the customer_validated contract"
+    - contract: transformation_plan
+      description: "Tests derived from transformation_plan contract"
       cases:
-        - test_id: "customer_validated_inherits_raw"
-          type: schema_validation
-          description: "Verify validated contract includes all fields from customer_raw plus additions"
+        - test_id: "plan_has_valid_dialect"
+          type: field_quality
+          description: "Verify dialect is one of supported platforms"
+          field: target_dialect
+          rule: allowed_values
           auto_generate: true
 
-        - test_id: "customer_validated_score_range"
+        - test_id: "plan_model_count_bounds"
           type: field_quality
-          description: "Verify quality_score is between 0.0 and 1.0"
-          field: quality_score
+          description: "Verify planned model count is within bounds"
+          field: total_models_planned
           rule: range
           auto_generate: true
 
-  # --- Custom Tests -------------------------------------------
-  # Edge cases and integration scenarios specified by the Documentarian.
   custom_tests:
-    - test_id: "empty_file_handling"
+    - test_id: "dbt_compile_sandbox_dry_run"
       type: integration
-      description: "Verify pipeline handles empty CSV files gracefully (no-op, not error)"
-      stage: ingest
-      setup: "Provide empty CSV file in source location"
-      expected_behavior: "Stage completes with 0 records processed, INFO log, no errors"
+      description: "Verify generated dbt artifact bundle compiles with zero syntax errors via dbt compile"
+      stage: dry_run
+      setup: "Mount generated dbt_artifact_bundle into sandbox directory with mocked profiles.yml"
+      expected_behavior: "dbt compile returns exit code 0 and emits manifest.json"
 
-    - test_id: "schema_evolution_new_column"
+    - test_id: "sqlglot_ast_lint_pass"
       type: integration
-      description: "Verify pipeline handles new columns in source CSV without failing"
-      stage: ingest
-      setup: "Provide CSV with an extra column not in the contract"
-      expected_behavior: "Stage completes with WARNING log about new column, all existing columns processed normally"
+      description: "Verify all generated SQL model files pass SQLGlot dialect validation"
+      stage: generate
+      setup: "Feed generated SQL strings to SQLGlot parser"
+      expected_behavior: "Parser emits valid AST without ParseError"
 
-    - test_id: "quality_gate_threshold"
-      type: integration
-      description: "Verify pipeline fails when quality score drops below 95%"
-      stage: validate
-      setup: "Provide batch where 10% of records have invalid customer_id format"
-      expected_behavior: "Quality gate fails, pipeline halts, alert sent"
-
-    - test_id: "full_pipeline_happy_path"
+    - test_id: "human_review_gate_interruption"
       type: end_to_end
-      description: "Verify complete pipeline from S3 ingestion to Snowflake publication"
-      setup: "Provide valid sample CSV in source location"
-      expected_behavior: "All stages complete, records appear in warehouse, audit trail complete, no quarantine"
+      description: "Verify state machine halts at review stage before executing deliver"
+      stage: review
+      setup: "Trigger agent run with valid source profile"
+      expected_behavior: "State machine enters LangGraph interrupt() state and awaits human approval"
 ```
 
 ---
@@ -1125,85 +1008,80 @@ Implementation documents reference each other through a system of named identifi
 
 | From | To | Reference Field | Example |
 |---|---|---|---|
-| `agent.yaml` → Stage | `stages/stage_<id>.yaml` | `pipeline.stages[].stage_id` | `stage_id: validate` → file `stages/stage_validate.yaml` |
-| `agent.yaml` → Component | Tier 2 `component_registry` | `dependencies.shared_components[].component_id` | `component_id: audit_logger_v1` |
-| Stage → Contract | `contracts/<name>.yaml` | `input.contract`, `output.contract` | `contract: customer_raw` → file `contracts/customer_raw.yaml` |
-| Stage → Tool | `agent.yaml` `dependencies.tools` | `tools[].name` | `name: great_expectations` |
-| Stage → Config | `config.yaml` | `${config.<path>}` syntax | `${config.sources.customer_csv.uri}` |
-| Stage → Secret | `config.yaml` `secrets` | `${secrets.<name>}` syntax | `${secrets.staging_db_password}` |
-| Contract → Contract | `contracts/<name>.yaml` | `extends` | `extends: customer_raw` |
-| Tests → Contract | `contracts/<name>.yaml` | `contract_tests[].contract` | `contract: customer_raw` |
-| Tests → Stage | `stages/stage_<id>.yaml` | `custom_tests[].stage` | `stage: validate` |
+| `agent.yaml` → Stage | `stages/stage_<id>.yaml` | `pipeline.stages[].stage_id` | `stage_id: plan` → file `stages/stage_plan.yaml` |
+| `agent.yaml` → Component | Tier 2 `component_registry` | `dependencies.shared_components[].component_id` | `component_id: schema_inspector_v1` |
+| Stage → Contract | `contracts/<name>.yaml` | `input.contract`, `output.contract` | `contract: source_schema_profile` → file `contracts/source_schema_profile.yaml` |
+| Stage → Tool | `agent.yaml` `dependencies.tools` | `tools[].name` | `name: litellm` |
+| Stage → Config | `config.yaml` | `${config.<path>}` syntax | `${config.sources.postgres_oltp.uri}` |
+| Stage → Secret | `config.yaml` `secrets` | `${secrets.<name>}` syntax | `${secrets.source_db_password}` |
+| Tests → Contract | `contracts/<name>.yaml` | `contract_tests[].contract` | `contract: transformation_plan` |
+| Tests → Stage | `stages/stage_<id>.yaml` | `custom_tests[].stage` | `stage: dry_run` |
 
 ### Consistency Rules
 
 The Documentarian **must** maintain these invariants. The Builder **assumes** they hold.
 
-1. **Every `stage_id` in `agent.yaml`'s pipeline must have a corresponding stage file.** If `agent.yaml` lists `stage_id: validate`, then `stages/stage_validate.yaml` must exist.
+1. **Every `stage_id` in `agent.yaml`'s pipeline must have a corresponding stage file.** If `agent.yaml` lists `stage_id: plan`, then `stages/stage_plan.yaml` must exist.
 
-2. **Every contract referenced by a stage must have a corresponding contract file.** If a stage declares `input.contract: customer_raw`, then `contracts/customer_raw.yaml` must exist.
+2. **Every contract referenced by a stage must have a corresponding contract file.** If a stage declares `input.contract: source_schema_profile`, then `contracts/source_schema_profile.yaml` must exist.
 
 3. **Every `${config.*}` reference in any document must resolve to a path in `config.yaml`.** The Builder does not invent configuration values.
 
 4. **Every `${secrets.*}` reference must appear in `config.yaml`'s `secrets` list.** This documents the required secrets for operators.
 
-5. **Contract `extends` references must point to an existing contract.** Circular extends chains are forbidden.
+5. **Pipeline `next` references must point to valid stage IDs or `null`.** No broken links in the execution chain.
 
-6. **Pipeline `next` references must point to valid stage IDs or `null`.** No broken links in the execution chain.
-
-7. **The `on_error` route in `agent.yaml` must reference a valid stage ID or error handler.** Error routing paths must be resolvable.
+6. **The `on_error` route in `agent.yaml` or stage error strategies must reference a valid stage ID or self-correction reflection step.** Error routing paths must be resolvable.
 
 ---
 
 ## 6. Contract Specification Detail
 
-Data contracts are the core abstraction of the implementation document system. They serve as the single source of truth for what data looks like at every point in the pipeline.
+Data contracts are the core abstraction of the implementation document system. They serve as the single source of truth for agent state schemas and generated engineering artifacts flowing between stages.
 
-### 6.1 Field-Level Specification
+### 6.1 Contract Header & Storage Modes
 
-Every field in a contract requires these properties:
+Contracts support two execution storage modes:
+- `storage_mode: inline` (default): Payloads and data structures flow directly within memory and are serialized into the LangGraph `AgentState`.
+- `storage_mode: claim_check`: Large code repositories, generated files, or multi-megabyte artifact archives are stored externally (on local filesystem or object storage). The contract defines Claim Check pointer attributes (`bundle_id`, `storage_uri`, `file_manifest`, `artifact_sha256`), ensuring PostgreSQL checkpointer snapshots remain sub-millisecond and tamper-evident.
+
+### 6.2 Field-Level Specification & Recursive Nesting
+
+Every field in an agent contract requires these properties:
 
 | Property | Type | Required | Description |
 |---|---|---|---|
-| `name` | string | Yes | Field identifier. Must be a valid identifier in all target systems (no spaces, special characters). |
-| `type` | enum | Yes | Logical data type. The Builder maps these to runtime-specific types (Python, SQL, Pydantic). |
-| `nullable` | boolean | Yes | Whether null/missing values are permitted. Drives NOT NULL constraints in DDL and Optional[] in Pydantic. |
-| `description` | string | Yes | Human-readable explanation of the field's meaning, source, and usage. |
-| `primary_key` | boolean | No | Whether this field is the primary identifier. Default: false. |
-| `pii` | boolean | No | Whether this field contains personally identifiable information. Default: false. |
-| `pii_category` | string | If `pii: true` | Classification of PII type. Used by governance rules to select masking strategy. |
-| `max_length` | integer | No | Maximum string length. Generates VARCHAR(n) in DDL, max_length validator in Pydantic. |
-| `precision` | integer | No | Decimal precision (total digits). |
-| `scale` | integer | No | Decimal scale (digits after decimal point). |
+| `name` | string | Yes | Field identifier. Must be a valid identifier (no spaces, special characters). |
+| `type` | enum | Yes | Logical data type: `string`, `integer`, `float`, `boolean`, `timestamp`, `array`, `object`. Compiles directly to Pydantic v2 / Instructor types. |
+| `nullable` | boolean | Yes | Whether null/missing values are permitted. Drives `Optional[...]` in Pydantic models. |
+| `description` | string | Yes | Human-readable explanation of the field's meaning and purpose in agent reasoning. |
+| `items` | object | Conditional | **Required when `type: array`**. For scalar arrays, specify scalar type (e.g. `items: { type: string }`). For nested object arrays, specify `type: object`, `model_name` (the nested Pydantic class to compile), and recursive `fields[]`. |
+| `fields` | list | Conditional | **Required when `type: object`**. List of child field specifications compiling into a nested Pydantic model (`model_name`). |
 | `default` | any | No | Default value. Use `${now}` for current timestamp, `${today}` for current date. |
-| `quality_rules` | list | No | Per-field quality validation rules. See Section 6.2. |
+| `quality_rules` | list | No | Per-field validation rules enforced by Pydantic validators and Instructor retries. |
 
-### Logical Type Mapping
+### Logical Type Mapping to Python Pydantic
 
-The Builder maps logical types to target-specific types:
+The Builder maps contract logical types to typed Python constructs:
 
-| Logical Type | Python / Pydantic | PostgreSQL DDL | Snowflake DDL |
-|---|---|---|---|
-| `string` | `str` | `VARCHAR(n)` or `TEXT` | `VARCHAR(n)` or `STRING` |
-| `integer` | `int` | `INTEGER` or `BIGINT` | `INTEGER` or `BIGINT` |
-| `float` | `float` | `DOUBLE PRECISION` | `FLOAT` |
-| `decimal` | `Decimal` | `NUMERIC(p,s)` | `NUMBER(p,s)` |
-| `boolean` | `bool` | `BOOLEAN` | `BOOLEAN` |
-| `date` | `datetime.date` | `DATE` | `DATE` |
-| `datetime` | `datetime.datetime` | `TIMESTAMP` | `TIMESTAMP_NTZ` |
-| `timestamp` | `datetime.datetime` | `TIMESTAMPTZ` | `TIMESTAMP_TZ` |
-| `uuid` | `uuid.UUID` | `UUID` | `VARCHAR(36)` |
-| `json` | `dict` | `JSONB` | `VARIANT` |
-| `array` | `list` | `JSONB` (array) | `ARRAY` |
-| `map` | `dict` | `JSONB` (object) | `OBJECT` |
+| Logical Type | Python / Pydantic v2 Type | Usage in Agent Reasoning |
+|---|---|---|
+| `string` | `str` | Text attributes, model names, SQL strings, JSON strings |
+| `integer` | `int` | Counts, retry counters, latency measurements, row estimates |
+| `float` | `float` | Quality scores, cost tracking, probabilities |
+| `boolean` | `bool` | Status flags, approval indicators |
+| `timestamp` | `datetime.datetime` | Generation timestamps, run benchmarks |
+| `array` (scalar) | `List[T]` | Collections of strings, integers, or paths |
+| `array` (nested) | `List[NestedModel]` | Collections of compiled child models (`items.model_name`) |
+| `object` | Nested `BaseModel` | Structured child specifications (`model_name`, `fields[]`) |
 
-### 6.2 Quality Rules
+### 6.3 Quality Rules
 
 Quality rules are specified per-field and define the validation logic the Builder generates.
 
 | Rule Type | Parameters | What the Builder Generates |
 |---|---|---|
-| `regex` | `pattern`, `severity`, `message` | Regex match validation. Error = quarantine. Warning = log. |
+| `regex` | `pattern`, `severity`, `message` | Regex match validation. Error = fail. Warning = log. |
 | `not_empty` | `severity`, `message` | Check that string value is not empty (after trimming). |
 | `uniqueness` | `scope` (batch/global), `severity`, `message` | Dedup check. Batch = within current batch. Global = across all historical data. |
 | `allowed_values` | `values[]`, `severity`, `message` | Enum validation — value must be one of the listed options. |
@@ -1212,17 +1090,17 @@ Quality rules are specified per-field and define the validation logic the Builde
 | `referential_integrity` | `reference_contract`, `reference_field`, `severity`, `message` | FK check — value must exist in the referenced contract's field. |
 | `custom` | `expression`, `severity`, `message` | Custom validation expression (Python-evaluable). Use sparingly. |
 
-### 6.3 Aggregate Quality Rules
+### 6.4 Aggregate Quality Rules
 
-Aggregate rules apply to the entire dataset:
+Aggregate rules apply to complete contract payloads or artifact collections:
 
 | Rule Type | Parameters | Description |
 |---|---|---|
 | `completeness` | `field`, `threshold`, `severity` | Percentage of non-null values for a field must exceed threshold |
-| `volume` | `min_records`, `max_records`, `severity` | Total record count must fall within expected range |
+| `cardinality` | `min_items`, `max_items`, `severity` | Total count of models, tables, or files must fall within expected range |
 | `distribution` | `field`, `expected_distribution`, `tolerance`, `severity` | Value distribution should roughly match expectations (future) |
 
-### 6.4 SLA Definitions
+### 6.5 SLA Definitions
 
 SLAs declare operational expectations. The Builder generates monitoring and alerting code from these.
 
@@ -1232,7 +1110,7 @@ SLAs declare operational expectations. The Builder generates monitoring and aler
 | `availability` | `uptime_percent` | Monitoring target for the pipeline schedule. Dashboards. |
 | `latency` | `max_processing_seconds` | Pipeline duration monitoring. Alert if exceeds. |
 
-### 6.5 How the DCM Schema Engine Compiles Contracts
+### 6.6 How the DCM Schema Engine Compiles Contracts
 
 When a contract is used as a database destination (i.e., a stage writes to a database table), the Builder invokes the DCM Schema Engine to compile the contract into PostgreSQL DDL. The flow:
 
@@ -1263,10 +1141,10 @@ When the DCM Schema Engine compiles YAML contracts into physical database DDL, i
 
 ### 7.2 Quality Thresholds & Stage Gates
 
-Operational data quality is enforced deterministically at the pipeline boundaries:
-- **Field & Aggregate Assertions**: Declared in `contracts/*.yaml` and compiled into Great Expectations checkpoints.
-- **Stage Error Routing**: Declared in `stages/*.yaml` via `error_strategy: quarantine | fail | retry`. If a batch fails quality checks, records are quarantined to a staging destination and summary metrics are recorded.
-- **Human Approval Gates**: Declared in `agent.yaml` or `stages/*.yaml` (`autonomy: human_required`). Implements LangGraph `interrupt()` nodes with Claim Check pointers (`PAT-01`), requiring explicit human sign-off before irreversible actions (e.g., publishing to golden analytics tables).
+Operational data quality and engineering integrity are enforced deterministically at the pipeline boundaries:
+- **Engineering Contract & Model Assertions**: Agent payload contracts are validated deterministically via Instructor / Pydantic models at stage boundaries. For generated Layer 3 data models, assertions are compiled into native dbt generic tests (`unique`, `not_null`, `relationships`, `accepted_values`) verified during the sandbox dry run.
+- **Stage Error Routing**: Declared in `stages/*.yaml` via `error_strategy: retry | reflect | fail_fast | escalate`. If a tool execution, AST check, or sandbox compilation fails, diagnostic traces trigger reflection loops or escalate to human review.
+- **Human Approval Gates**: Declared in `agent.yaml` or `stages/*.yaml` (`autonomy: human_required`). Implements LangGraph `interrupt()` nodes with Claim Check pointers (`PAT-01`), requiring explicit human sign-off before side-effecting actions (e.g., delivering Git Pull Requests or applying production migrations).
 
 ### 7.3 Automated Auditability via Metadata Callbacks
 
@@ -1291,24 +1169,22 @@ The Builder specialist receives the approved implementation documents as its **e
 
 The Builder selects a generation strategy based on `architecture.runtime` and maps impl doc concepts to runtime-specific constructs:
 
-| Impl Doc Concept | LangGraph Strategy | Python Pipeline Strategy | Streaming Strategy |
-|---|---|---|---|
-| **Stage** | A node function registered in the state graph | A function called in sequential `main()` | A message handler class |
-| **Pipeline wiring** (`next`, `on_error`) | Graph edges (fixed and conditional) | Sequential function calls with try/except | Kafka topic routing and error topics |
-| **Contract** | Claim Check pointer (`ContractPointer` in `AgentState`) with Pydantic model validation at stage boundary | Pydantic model or dataclass for function I/O | Message schema (Avro/Pydantic) |
-| **Error handling** (quarantine) | State update with error flag, conditional routing | Function return with error dataframe, logging | Dead-letter topic publishing |
-| **Quality & State Machine Gates** | State machine gate node or Claim Check checkpoint | Validation function check with quarantine return | Middleware interceptor or DLQ router |
-| **Human gate** | LangGraph interrupt node with Chainlit UI | Input prompt / API call with blocking wait | N/A (streaming pipelines rarely have human gates) |
-| **Configuration** | Environment-resolved config dataclass | Config file reader (YAML/env) | Environment variables + config map |
-| **Quality gate** | Conditional edge based on quality metric in state | If-check after validation function | Metric check with circuit breaker |
-| **Test** | pytest functions testing node state transitions | pytest functions testing function I/O | pytest functions testing handler behavior |
+| Impl Doc Concept | LangGraph Strategy (`langgraph`) | Python + LiteLLM Strategy (`python_litellm`) |
+|---|---|---|
+| **Stage** | A node function registered in the `StateGraph` | A function called in sequential pipeline execution |
+| **Pipeline wiring** (`next`, `on_error`) | Graph edges, conditional routing, and self-correction reflection loops | Sequential function calls with error handling & retry |
+| **Contract** | Typed Instructor Pydantic model validating node I/O and structured LLM reasoning | Pydantic model for function parameter and return validation |
+| **Tool Invocation** | Agentic `@tool` functions bound to nodes or tool-calling loops (`ToolNode`) | Direct Python function or SDK execution |
+| **Human Gate** | LangGraph `interrupt()` node with state freeze and Chainlit UI review form | Blocking CLI prompt, webhook trigger, or approval callback |
+| **Configuration** | Pydantic `BaseSettings` reading environment variables with secrets resolution | Pydantic `BaseSettings` instance |
+| **Test** | pytest suite testing StateGraph node transitions, mocks, and reflection loops | pytest suite testing function I/O and mocked tool responses |
 
 ### 8.3 Shared Component Resolution
 
-When a stage references a shared component (prefixed with `shared:` in the tools section), the Builder:
+When a stage declares a tool with `type: shared_component` in `processing.tools[]` (e.g. `name: schema_inspector_v1`), the Builder:
 
-1. Looks up the component in `agent.yaml`'s `dependencies.shared_components`
-2. Finds the component's `usage_type` — `import`, `extend`, or `wrap`
+1. Looks up the component in `agent.yaml`'s `dependencies.shared_components` matching `component_id == tool.name`
+2. Resolves its `usage_type` declared in `agent.yaml` — `import`, `extend`, or `wrap` (`usage_type` is configured exclusively in `agent.yaml` to prevent conflicting stage-level overrides)
 3. If `import`: generates an import statement for the shared component from the shared folder
 4. If `extend`: generates a subclass that extends the component with agent-specific behavior
 5. If `wrap`: generates an adapter class that wraps the component's interface
@@ -1319,58 +1195,64 @@ The Builder does **not** copy shared component code into the agent's directory. 
 
 For every contract, the Builder generates:
 
-1. **Schema tests** — verify all required fields exist with correct types
-2. **Per-field quality tests** — one test per `quality_rules` entry per field
-3. **Aggregate quality tests** — one test per `aggregate_rules` entry
-4. **Synthetic data generators** — test fixtures that produce data matching the contract's schema
+1. **Schema tests** — verify all required fields exist with correct types in Pydantic models
+2. **Field validation tests** — one test per `quality_rules` entry per field
+3. **Synthetic artifact generators** — test fixtures that produce mock artifacts matching the contract's schema
 
-For pipeline integration and quality gate tests, the Builder generates:
+For agent integration and gate tests, the Builder generates:
 
-1. **Gate enforcement tests** — verify that quality gates halt execution or quarantine invalid records when thresholds are breached
-2. **Metadata telemetry tests** — verify that lifecycle callbacks write execution and quality records to metadata framework Tier 1 and Tier 2 tables
-3. **SLA verification tests** — verify that latency and freshness assertions trigger alerts when operational bounds are exceeded
+1. **Gate enforcement tests** — verify that the state machine halts execution at human review gates before side-effecting actions
+2. **Metadata telemetry tests** — verify that lifecycle callbacks record token usage, execution spans, and decision records to Tier 1 tables
+3. **Reflection loop tests** — verify that lint or compilation failures trigger self-correction reflection loops up to safety valve ceilings
 
 ### 8.5 Bespoke Logic Generation via Leaf Coder
 
 When processing stages in pipeline order:
-1. **Hook Detection**: The Builder inspects each stage for `stage.transform_handler: "<path>::<func>"` (e.g., `"handlers/enrich_customer.py::compute_tiers"`).
-2. **Deterministic Skeleton Generation**: The Deterministic Scaffold Compiler generates the StateGraph node and wiring, importing the handler dynamically (`from src.handlers.enrich_customer import compute_tiers`).
+1. **Hook Detection**: The Builder inspects each stage's `processing.tools[]` for entries declaring `type: custom_code` and `handler: "<path>::<func>"` (e.g., `"tools/sqlglot_verifier.py::validate_sql_ast"`).
+2. **Deterministic Skeleton Generation**: The Deterministic Scaffold Compiler generates the StateGraph DAG, LiteLLM client config, Instructor models, and imports the tool handler hook.
 3. **State Projection**: The Builder extracts a minimal, laser-focused state projection containing ONLY:
+   - Tool callable signature (`signature`) and hook path (`handler`)
    - Input contract Pydantic schema (`input.contract`)
    - Output contract Pydantic schema (`output.contract`)
-   - Stage transformation requirements (`processing.logic_description`)
+   - Stage logic description (`processing.logic_description`)
    - Declared tools/libraries (`processing.tools`)
-4. **Leaf Coder Synthesis**: The **LLM Leaf Coder** receives this narrow context and synthesizes the isolated, version-controlled handler function (`src/handlers/enrich_customer.py`) and corresponding unit tests (`tests/unit/test_enrich_customer.py`).
-5. **Decoupled Evolution**: Orchestration skeleton and contracts remain strictly immutable (`# DO NOT EDIT`), while custom imperative logic in `src/handlers/` is fully maintainable and editable by human engineers.
+4. **Leaf Coder Synthesis**: The **LLM Leaf Coder** receives this narrow context and synthesizes the isolated, version-controlled tool or verifier (`src/tools/sqlglot_verifier.py`) and corresponding unit tests (`tests/unit/test_sqlglot_verifier.py`).
+5. **Decoupled Evolution**: Orchestration skeleton and contracts remain strictly immutable (`# DO NOT EDIT`), while custom imperative logic in `src/tools/` and `src/prompts/` is fully maintainable and editable by human engineers.
 
 ---
 
 ## 9. A Complete Example
 
-The following is a complete implementation document set for the **Customer Data Pipeline** agent. All files are shown in full. This is the exact set of documents the Documentarian would produce and the Builder would consume.
+The following is a complete implementation document set for the **dbt Pipeline Builder Agent**. All files are shown in full. This is the exact set of documents the Documentarian would produce and the Builder would consume.
 
 > [!NOTE]
-> The complete schemas for all documents in this example have already been provided inline in Section 4 above. This section confirms the full file list and summarizes the inter-document references for the Customer Data Pipeline, rather than duplicating the YAML. Refer to:
+> The complete schemas for all documents in this example have already been provided inline in Section 4 above. This section confirms the full file list and summarizes the inter-document references for the dbt Pipeline Builder Agent, rather than duplicating the YAML. Refer to:
 > - [Section 4.1](#41-agent-manifest--agentyaml) for `agent.yaml`
-> - [Section 4.2](#42-stage-documents--stagesstage_idyaml) for `stages/stage_ingest.yaml`, `stages/stage_validate.yaml`, `stages/stage_enrich.yaml`
-> - [Section 4.3](#43-contract-documents--contractsnameyaml) for `contracts/customer_raw.yaml`, `contracts/customer_validated.yaml`
+> - [Section 4.2](#42-stage-documents--stagesstage_idyaml) for `stages/stage_discover.yaml`, `stages/stage_plan.yaml`, `stages/stage_generate.yaml`
+> - [Section 4.3](#43-contract-documents--contractsnameyaml) for `contracts/source_schema_profile.yaml`, `contracts/transformation_plan.yaml`, `contracts/dbt_artifact_bundle.yaml`
 > - [Section 4.4](#44-configuration-document--configyaml) for `config.yaml`
 > - [Section 4.5](#45-test-document--testsyaml) for `tests.yaml`
 
 ### Complete File List
 
 ```
-customer_data_pipeline/
+dbt_pipeline_builder_agent/
 ├── agent.yaml                          # Agent manifest (Section 4.1)
 ├── stages/
-│   ├── stage_ingest.yaml               # Ingestion stage (Section 4.2 — first example)
-│   ├── stage_validate.yaml             # Validation stage (Section 4.2 — second example)
-│   ├── stage_enrich.yaml               # Enrichment stage with Leaf Coder hook (Section 4.2 — third example)
-│   └── stage_publish.yaml              # Publication stage (not shown — follows same pattern)
+│   ├── stage_discover.yaml             # Discovery stage (Section 4.2 — first example)
+│   ├── stage_plan.yaml                 # Transformation planning stage (Section 4.2 — second example)
+│   ├── stage_generate.yaml             # Code generation stage with verifier hook (Section 4.2 — third example)
+│   ├── stage_dry_run.yaml              # Sandbox compilation & test execution stage
+│   ├── stage_review.yaml               # Human review gate stage (interrupt)
+│   └── stage_deliver.yaml              # Git PR delivery & Tier 2 catalog registration
 ├── contracts/
-│   ├── customer_raw.yaml               # Raw customer contract (Section 4.3 — first example)
-│   ├── customer_validated.yaml         # Validated customer contract (Section 4.3 — second example)
-│   └── customer_enriched.yaml          # Enriched customer contract (not shown — follows same pattern)
+│   ├── source_database_reference.yaml  # Initial catalog inspection parameters
+│   ├── source_schema_profile.yaml      # Discovered source catalog schema (Section 4.3 — first example)
+│   ├── transformation_plan.yaml        # Transformation architecture plan (Section 4.3 — second example)
+│   ├── dbt_artifact_bundle.yaml        # Synthesized dbt bundle (Section 4.3 — third example)
+│   ├── compilation_report.yaml         # Sandbox compilation diagnostics
+│   ├── reviewed_artifact_bundle.yaml   # Human-signed artifact bundle
+│   └── delivery_manifest.yaml          # Git delivery and PR publication manifest
 ├── config.yaml                         # Configuration (Section 4.4)
 └── tests.yaml                          # Test specifications (Section 4.5)
 ```
@@ -1379,29 +1261,43 @@ customer_data_pipeline/
 
 ```
 agent.yaml
-  ├── pipeline.stages[0].stage_id: ingest ──────────── stages/stage_ingest.yaml ✓
-  ├── pipeline.stages[1].stage_id: validate ────────── stages/stage_validate.yaml ✓
-  ├── pipeline.stages[2].stage_id: enrich ──────────── stages/stage_enrich.yaml ✓
-  ├── pipeline.stages[3].stage_id: publish ─────────── stages/stage_publish.yaml ✓
-  ├── dependencies.tools[0]: great_expectations ────── used_by: [validate] ✓
-  ├── dependencies.tools[1]: boto3 ─────────────────── used_by: [ingest] ✓
-  ├── dependencies.tools[2]: snowflake-connector ───── used_by: [publish] ✓
-  └── dependencies.shared_components[0]: audit_logger_v1 used_by: [validate, enrich, publish] ✓
+  ├── pipeline.stages[0].stage_id: discover ────────── stages/stage_discover.yaml ✓
+  ├── pipeline.stages[1].stage_id: plan ────────────── stages/stage_plan.yaml ✓
+  ├── pipeline.stages[2].stage_id: generate ────────── stages/stage_generate.yaml ✓
+  ├── pipeline.stages[3].stage_id: dry_run ─────────── stages/stage_dry_run.yaml ✓
+  ├── pipeline.stages[4].stage_id: review ──────────── stages/stage_review.yaml ✓
+  ├── pipeline.stages[5].stage_id: deliver ─────────── stages/stage_deliver.yaml ✓
+  ├── dependencies.tools[0]: litellm ───────────────── used_by: [plan, generate] ✓
+  ├── dependencies.tools[1]: instructor ────────────── used_by: [plan, generate] ✓
+  ├── dependencies.tools[2]: dbt-core ──────────────── used_by: [dry_run] ✓
+  ├── dependencies.tools[3]: sqlglot ───────────────── used_by: [generate, dry_run] ✓
+  ├── dependencies.shared_components[0]: schema_inspector_v1 used_by: [discover] ✓
+  └── dependencies.shared_components[1]: git_deliverer_v1    used_by: [deliver] ✓
 
-stages/stage_ingest.yaml
-  ├── input.contract: customer_raw ─────────────────── contracts/customer_raw.yaml ✓
-  ├── output.contract: customer_raw ────────────────── contracts/customer_raw.yaml ✓
-  └── ${config.sources.customer_csv.uri} ───────────── config.yaml → defaults.sources.customer_csv.uri ✓
+stages/stage_discover.yaml
+  ├── input.source.uri: ${config.sources.postgres_oltp.uri} ── config.yaml ✓
+  └── output.contract: source_schema_profile ───────── contracts/source_schema_profile.yaml ✓
 
-stages/stage_validate.yaml
-  ├── input.contract: customer_raw ─────────────────── contracts/customer_raw.yaml ✓
-  ├── output.contract: customer_validated ──────────── contracts/customer_validated.yaml ✓
-  └── ${config.destinations.quarantine.uri} ────────── config.yaml → defaults.destinations.quarantine.uri ✓
+stages/stage_plan.yaml
+  ├── input.contract: source_schema_profile ────────── contracts/source_schema_profile.yaml ✓
+  └── output.contract: transformation_plan ─────────── contracts/transformation_plan.yaml ✓
 
-stages/stage_enrich.yaml
-  ├── input.contract: customer_validated ───────────── contracts/customer_validated.yaml ✓
-  ├── output.contract: customer_enriched ──────────── contracts/customer_enriched.yaml ✓
-  └── stage.transform_handler: handlers/enrich_customer.py::compute_tiers ✓
+stages/stage_generate.yaml
+  ├── input.contract: transformation_plan ──────────── contracts/transformation_plan.yaml ✓
+  ├── output.contract: dbt_artifact_bundle ─────────── contracts/dbt_artifact_bundle.yaml ✓
+  └── processing.tools[0].handler: tools/sqlglot_verifier.py::validate_sql_ast ✓
+
+stages/stage_dry_run.yaml
+  ├── input.contract: dbt_artifact_bundle ─────────── contracts/dbt_artifact_bundle.yaml ✓
+  └── output.contract: compilation_report ─────────── contracts/compilation_report.yaml ✓
+
+stages/stage_review.yaml
+  ├── input.contract: compilation_report ──────────── contracts/compilation_report.yaml ✓
+  └── output.contract: reviewed_artifact_bundle ───── contracts/reviewed_artifact_bundle.yaml ✓
+
+stages/stage_deliver.yaml
+  ├── input.contract: reviewed_artifact_bundle ────── contracts/reviewed_artifact_bundle.yaml ✓
+  └── output.contract: delivery_manifest ──────────── contracts/delivery_manifest.yaml ✓
 ```
 
 ---
@@ -1429,10 +1325,9 @@ An implementation document set must satisfy these rules before the Builder proce
 | Every `input.contract` and `output.contract` must have a corresponding `contracts/<name>.yaml` | File existence per contract |
 | Every `${config.*}` must resolve in `config.yaml` | Config path resolution |
 | Every `${secrets.*}` must appear in `config.yaml`'s `secrets` list | Secret registration |
-| Contract `extends` must reference an existing contract | Inheritance resolution |
 | Pipeline `next` must reference a valid `stage_id` or be `null` | Stage reference check |
-| `stage.transform_handler` string must conform to `<filepath>::<function_name>` pattern | Hook format validation |
-| `stage.transform_handler` target module must match callable signature against stage contracts | Hook interface integrity |
+| `processing.tools[].handler` string must conform to `<filepath>::<function_name>` pattern | Hook format validation |
+| `processing.tools[].handler` target module must match callable signature against declared `signature` | Hook interface integrity |
 
 ### 10.3 Completeness
 
@@ -1440,7 +1335,7 @@ An implementation document set must satisfy these rules before the Builder proce
 |---|---|
 | Every contract field must have a `description` | Human readability |
 | Every stage must have at least one error strategy | No unhandled errors |
-| If `transform_handler` is declared, `processing.logic_description` must be present and non-empty | Leaf Coder prompt completeness |
+| If `processing.tools[].handler` is declared, `processing.logic_description` must be present and non-empty | Leaf Coder prompt completeness |
 | Every `${config.*}` reference must resolve in all declared environments | Config completeness per environment |
 | Every required secret must be declared | Secret documentation completeness |
 
@@ -1454,7 +1349,7 @@ The Builder must not need to make design decisions. These rules ensure the impl 
 | Every field has an explicit nullable declaration — no defaults | Nullability explicitness |
 | Every error strategy has an explicit action — no fallback to "whatever seems right" | Error handling explicitness |
 | Every shared component reference has a `usage_type` — not "figure it out" | Component usage explicitness |
-| Bespoke transformation stages must explicitly specify either a `transform_handler` or a shared component tool | Transformation logic explicitness |
+| Reasoning stages must explicitly specify `llm_config` with model tier and output schema | Reasoning parameters explicitness |
 | Every configuration reference resolves to a value or a secret — no dangling references | Configuration completeness |
 
 ---
@@ -1465,21 +1360,22 @@ The Builder must not need to make design decisions. These rules ensure the impl 
 |---|---|---|---|
 | 1 | Document format | Pure YAML with rich `description` fields | Same dual-audience pattern as OpenAPI, dbt, Kubernetes manifests. Machine-parseable structure + human-readable descriptions. No mixed formats. |
 | 2 | Multi-file vs single file | Multiple files per agent (5-document suite) | Cognitive load management, change isolation, Builder context efficiency, clean git diffs. Each file has one responsibility. |
-| 3 | Runtime-agnostic stage specs | Stages specify WHAT, not HOW | The same impl doc works for LangGraph, Python pipeline, and streaming runtimes. Adding a new runtime means adding a Builder strategy, not changing the spec format. |
-| 4 | Contract inheritance (`extends`) | Supported via named reference | Validated contracts add fields to raw contracts. Avoids field duplication across related contracts while maintaining explicit schema. |
+| 3 | Runtime-agnostic stage specs | Stages specify WHAT, not HOW | The same impl doc works for LangGraph (stateful tool-calling agent with gates) and Python+LiteLLM (lightweight CLI/event agent). Adding a new runtime means adding a Builder strategy, not changing the spec format. |
+| 4 | Discrete Typed Contracts over Inheritance | Independent typed contracts per stage boundary | Layer 2 AI agents pass distinct artifacts (profiles, plans, bundles, reports) rather than mutating a single row schema down an inheritance pipeline. Avoids tight coupling between disparate stage interfaces. |
 | 5 | Configuration externalization | All values via `${config.*}` and `${secrets.*}` syntax | Nothing hardcoded. Same impl doc set deploys across dev/staging/production via environment overrides. Operators know exactly what secrets to provision. |
-| 6 | Data Sensitivity & Tagging on Contracts | Classification and column tags declared in `contracts/*.yaml` | Contracts define data classification (`confidential`, `restricted`) and semantic tags (`pii`, `phi`). Read by DCM to emit native database column tags for platform dynamic masking. |
+| 6 | Data Sensitivity & Tagging on Contracts | Classification and semantic tags declared in `contracts/*.yaml` | Contracts define data classification (`internal`, `confidential`) and semantic tags (`metadata`, `dbt`). Injected into generated models and lineage catalog. |
 | 7 | Streamlined 5-Document Suite | Retire standalone `governance.yaml` | Governance is an emergent property of contracts, quality gates, and metadata framework callbacks. Eliminates artificial separation and unifies rules with contracts and stages. |
-| 8 | Test derivation | Tests declared in `tests.yaml`, auto-generated from contracts | Builder generates schema tests, quality rule tests, and pipeline integration tests mechanically. Custom tests cover edge cases contracts can't express. |
-| 9 | Quality rules at field AND aggregate level | Both supported | Field rules catch individual bad records. Aggregate rules catch batch-level anomalies (too few records, too many nulls). Both are needed for complete data quality. |
-| 10 | Cross-document references by name | Named string references, not file paths | `contract: customer_raw` is cleaner than `contract: ./contracts/customer_raw.yaml`. The mapping from name to file is a convention the Builder knows. |
+| 8 | Test derivation | Tests declared in `tests.yaml`, auto-generated from contracts | Builder generates schema tests, field quality tests, and integration tests mechanically. Custom tests cover edge cases contracts can't express. |
+| 9 | Quality rules at field AND artifact level | Both supported | Field rules validate specific outputs (e.g. valid SQL dialect). Artifact rules validate complete deliverables (e.g. non-empty SQL files). |
+| 10 | Cross-document references by name | Named string references, not file paths | `contract: source_schema_profile` is cleaner than `contract: ./contracts/source_schema_profile.yaml`. The mapping from name to file is a convention the Builder knows. |
 | 11 | `${config.*}` syntax for externalization | Template variable syntax parsed at build/deploy time | Familiar pattern from Docker Compose, Helm, Spring Boot. Builder generates code that reads config; it doesn't inline values. |
-| 12 | Error strategy per-scenario | Multiple error strategies per stage, keyed by scenario | Different error types need different handling. Source unavailable needs retry. Parse errors need quarantine. Tool errors need fail. One-size-fits-all error handling is insufficient. |
-| 13 | Platform-Managed Data Protection | Enterprise policy consumer model (Collibra, Snowflake DDM) | Individual pipeline agents consume central governance rather than compiling bespoke regex masking scripts in Python. Tokenization happens at the ingestion edge or dynamic warehouse masking. |
-| 14 | Performance expectations in stage specs | `expected_duration`, `timeout`, `expected_record_count` | Builder generates monitoring, alerting, and timeout code from these. Without them, the Builder would have to guess or skip observability. |
+| 12 | Error strategy per-scenario | Multiple error strategies per stage, keyed by scenario | Different error types need different handling. Connection failures need retry. Lint/syntax errors need LLM reflection. Fatal issues need escalation. |
+| 13 | Platform-Managed Data Protection | Enterprise policy consumer model (Collibra, Snowflake DDM) | Individual pipeline agents consume central governance rather than compiling bespoke regex masking scripts in Python. |
+| 14 | Performance expectations in stage specs | `expected_duration`, `timeout` | Builder generates monitoring, alerting, and timeout code from these. Without them, the Builder would have to guess or skip observability. |
 | 15 | Single source of truth post-build | `impl_docs/` committed to agent Git repo; `spec.yaml` retired | Eliminates dual-spec drift. `spec.yaml` is strictly Day-0 intake. Day-2 enhancements operate directly on `impl_docs/*.yaml` via Git PR or Chainlit, avoiding competing sources of truth. |
-| 16 | Leaf Coder hook fields (`transform_handler`, `processing.logic_description`) | Explicit YAML stage hooks for bespoke imperative logic | Preserves mathematical determinism in orchestration skeleton compilation while allowing isolated LLM synthesis for custom transformation handlers. Handlers remain version-controlled and editable without touching graph wiring. |
-| 17 | Multi-Paradigm Execution Modes (`batch`, `chunked`, `row`) | Declared in `stage.yaml` (`processing.execution_mode`, `dataframe_engine`, `chunk_size`) | Prevents OOM and 500k-row latency bottlenecks. Vectorized DataFrame engines (Polars/Pandas) process bulk records with sub-second latency; chunked generators bind memory to $O(\text{chunk\_size})$ for row-level external calls; single-record mode serves streaming events. |
+| 16 | Leaf Coder hook fields (`processing.tools[].handler`, `processing.logic_description`) | Explicit YAML tool hooks for bespoke imperative logic | Preserves mathematical determinism in orchestration skeleton compilation while allowing isolated LLM synthesis for custom tools, prompt templates, and verifiers. |
+| 17 | Agentic Processing Paradigms | Declared in `stage.yaml` (`processing.processing_type: llm_reasoning | deterministic_tool | human_gate`) | Replaces Layer 3 bulk DataFrame execution modes (`batch`, `chunked`, `row`). LLM reasoning stages declare model tiers, Instructor output schemas, and prompt template refs; deterministic tool stages bind `@tool` definitions; human gates configure review pauses. |
+| 18 | Layer 2 DDLC AI Agent Modeling | Canonical reference agent: `dbt_pipeline_builder_agent` | Resolves the Layer collapse problem by cleanly separating Layer 2 (AI agents that build/operate data pipelines) from Layer 3 (the data pipelines themselves). Contracts define typed agent state and engineering artifacts (Pydantic/Instructor models), tools are agentic functions (`inspect_schema`, `run_dbt_compile`, `create_pr`), and telemetry tracks LLM token usage, spans, and human decisions natively. |
 
 ---
 

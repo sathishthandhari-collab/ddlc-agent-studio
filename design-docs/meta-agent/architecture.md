@@ -224,7 +224,7 @@ Six domain specialists, each responsible for one concern. Each specialist is a g
 
 **Responsibilities**:
 - Evaluate whether the spec's requirements are achievable with available tools and patterns
-- Research specific libraries and tools (Snowflake connector capabilities, PySpark limitations, Kafka client options)
+- Research specific libraries, models, and tools (LiteLLM provider capabilities, Instructor validation features, dbt-core CLI execution, SQLGlot dialect transpilation)
 - Assess tool compatibility (can these tools work together in the same pipeline?)
 - Identify risks and constraints that the spec doesn't mention
 - Produce a feasibility verdict with caveats
@@ -275,14 +275,14 @@ Six domain specialists, each responsible for one concern. Each specialist is a g
 > Detailed design for the Builder specialist is documented in [`builder.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/builder.md).
 
 **Architecture**: Following the pattern established by the DCM Schema Engine, the Builder is explicitly split into:
-1. **Deterministic Scaffold Compiler (Jinja2 + Python AST)**: Zero-LLM compiler that reads `impl_docs/` and emits the read-only orchestration skeleton (`# DO NOT EDIT`) — dual-compiled data contracts (Pydantic v2 + Pandera DataFrames), Great Expectations checkpoints, runtime state machine wiring (`langgraph`, `python_pipeline`, or `streaming`), and config loaders.
-2. **LLM Leaf Coder (Custom Handlers & Test Synthesizer)**: Narrowly-scoped LLM worker invoked only when a stage requires bespoke imperative Python logic (via `transform_handler: "handlers/mod.py::func"`). Synthesizes editable, version-controlled handler files (`src/handlers/`) and targeted unit tests.
+1. **Deterministic Scaffold Compiler (Jinja2 + Python AST)**: Zero-LLM compiler that reads `impl_docs/` and emits the read-only orchestration skeleton (`# DO NOT EDIT`) — Instructor Pydantic data contracts, StateGraph DAG wiring (`langgraph` or `python_litellm`), ToolNode bindings, reflection retry loops, and config loaders.
+2. **LLM Leaf Coder (Custom Tools & Test Synthesizer)**: Narrowly-scoped LLM worker invoked only when a stage requires bespoke imperative Python tools or prompt templates (via custom tool declarations: `processing.tools[].handler: "tools/mod.py::func"`). Synthesizes editable, version-controlled tool files (`src/tools/`), Jinja2 prompt templates (`src/prompts/`), and targeted unit tests.
 
 **Responsibilities**:
 - Read the approved implementation documents and compile the agent's complete codebase
 - Emit immutable skeleton code for data contracts, configuration, and DAG topology
-- Select the code generation strategy based on the declared runtime (`langgraph`, `python_pipeline`, `streaming`)
-- Synthesize custom leaf handlers and isolated pytest suites for stages with bespoke transformation logic
+- Select the code generation strategy based on the declared runtime (`langgraph`, `python_litellm`)
+- Synthesize custom leaf tools, prompt templates, and isolated pytest suites for stages with bespoke logic
 - For shared components: generate new ones into the shared folder, or generate imports for existing ones
 - Respect project conventions (file structure, naming, code style, AST validity)
 
@@ -300,6 +300,7 @@ Six domain specialists, each responsible for one concern. Each specialist is a g
 - Check quality rule compliance — every contract constraint and stage assertion has corresponding verification
 - Check for hardcoded values — all configuration must be externalized
 - Check shared component usage — reusable components are imported, not duplicated
+- Validate Jinja2 prompt template ASTs (`jinja2.meta.find_undeclared_variables`) to guarantee zero undeclared context variables against the Universal Prompt Contract (`input`, `diagnostics`, `feedback`, `config`)
 - Run generated tests where possible (without live infrastructure)
 - If issues are found, produce fix instructions for the Builder
 
@@ -358,8 +359,8 @@ Some phase transitions explicitly summarize to compress further. When the Archit
 
 Similarly, when clarification resolves:
 
-- All Q&A rounds are stored in the blackboard
-- But only the **design-impacting answers** are projected forward to the Researcher and Architect — "the user confirmed they want daily batch, not streaming" matters, "the user said the field name is `customer_id` not `cust_id`" was already folded into the parsed spec
+- Clarification rounds are stored in the blackboard
+- But only the **design-impacting answers** are projected forward to the Researcher and Architect — "the user confirmed they want a human review gate before Git delivery" matters, "the user clarified the schema name is 'analytics_prod'" was already folded into the parsed spec
 
 ### 5.4 State Accumulation — Append-Only
 
@@ -402,14 +403,14 @@ There is one RAG engine — one embedding pipeline, one vector store (pgvector),
 
 | Domain | Contents | Queried By |
 |---|---|---|
-| **Library & Tool Documentation** | API references, usage guides, and limitation docs for tools like Snowflake, PySpark, Kafka, Great Expectations, dbt, etc. | Researcher |
+| **Library & Tool Documentation** | API references, usage guides, and limitation docs for tools like LiteLLM, Instructor, dbt, SQLGlot, Snowflake, Great Expectations, etc. | Researcher |
 | **Organizational Standards** | Naming conventions, data governance policies, project structure rules, approved tool lists, security requirements | Researcher, Architect |
 | **Architecture Pattern Catalog** | Documented patterns for DDLC agents (see Section 7). Each pattern describes when to use it, what it looks like, what runtime it implies, and what trade-offs it carries. | Architect |
 | **Past Architecture Decisions** | Architecture proposals from previous builds, including what was chosen, what was rejected, and why. Grows with every build. | Architect |
 | **Shared Component Documentation** | Interface specifications, usage examples, and behavioral descriptions for shared components in the catalog | Architect, Builder |
 | **Code Conventions** | Project code style, test patterns, configuration structure, file naming rules | Builder |
 
-When the Researcher needs to know whether the Snowflake Python connector supports schema evolution, it queries the "Library & Tool Documentation" domain. When the Architect needs to know what pattern was used the last time a streaming agent was built, it queries the "Past Architecture Decisions" domain. Same engine, different document sets.
+When the Researcher needs to know whether SQLGlot supports Snowflake dialect transpilation, it queries the "Library & Tool Documentation" domain. When the Architect needs to know what pattern was used the last time a schema evolution agent was built, it queries the "Past Architecture Decisions" domain. Same engine, different document sets.
 
 ### 6.2 Metadata Framework — Structured Relational Data
 
@@ -465,7 +466,7 @@ These are SQL queries, not semantic searches. The catalog is a relational regist
 
 ## 7. Building Agents with Different Architectures
 
-Every DDLC agent the meta-agent builds can have a completely different architecture. One might be a simple Python batch script. Another might be a full LangGraph state machine with governance gates. Another might be a streaming Kafka processor.
+Every DDLC agent the meta-agent builds can have a completely different architecture. One might be a stateful multi-step agent with tool loops and approval gates. Another might be a lightweight event or CLI agent powered by Python + LiteLLM.
 
 The meta-agent handles this through three mechanisms: the **pattern catalog**, **runtime-agnostic implementation documents**, and the **Builder's generation strategies**.
 
@@ -476,12 +477,11 @@ The Architect specialist does not invent architectures from scratch. It selects 
 The initial catalog includes patterns like:
 | Pattern | Characteristics | Typical Runtime |
 |---|---|---|
-| **Simple Pipeline** | Linear stages, no human gates, no conditional routing, batch processing | Python + LiteLLM |
-| **Stateful Pipeline with Gates** | Has governance gates, human checkpoints, error recovery branches, conditional routing | LangGraph |
-| **Batch Processor** | Periodic runs, bulk data, schedule-driven, no real-time component | Python + scheduler |
-| **Streaming Processor** | Real-time data, event-driven, message queues (Kafka), continuous processing | Python + Kafka client |
-| **Multi-Source Aggregator** | Pulls from multiple sources, joins/reconciles, publishes unified output | Depends on complexity |
-| **Governance-Heavy Pipeline** | PII handling, audit trails, approval gates at multiple stages, lineage tracking | LangGraph (for the gate enforcement) |
+| **Stateful Pipeline with Gates** | Multi-step pipeline with human review gates, error recovery reflection loops, conditional routing | LangGraph |
+| **ReAct Tool Agent** | Tool calling loop with dynamic dispatch, autonomous reason-act cycles | LangGraph |
+| **Multi-Step Planner Agent** | Upfront reasoning/planning stage feeding subsequent code generation and verification stages | LangGraph |
+| **Lightweight Event/CLI Agent** | Single-turn or linear tool invocation without checkpoint persistence | Python + LiteLLM |
+| **Multi-Source Lineage Inspector** | Inspects cross-database catalogs, joins metadata, publishes unified contract lineage | LangGraph |
 
 The Architect's process:
 
@@ -498,34 +498,32 @@ The catalog is not static. Every time the meta-agent builds an agent, the archit
 
 The implementation documents are the **abstraction layer** between the Architect and the Builder.
 
-The impl docs do NOT say "create a LangGraph node called `validate_data`." They say:
+The impl docs do NOT say "create a LangGraph node called `discover_sources`." They say:
 
-> Stage 3: Validate data quality.  
-> Input contract: `customer_staging` (fields: id, name, email, created_at).  
-> Quality rules: email must match regex, id must be unique, created_at must be within 24 hours.  
-> Tool: Great Expectations.  
-> Error strategy: quarantine failing rows, log summary, proceed with valid rows.  
-> Governance: log all quarantined rows to audit trail.
+> Stage 1: Discover source database schemas.  
+> Output contract: `source_schema_profile`.  
+> Tool: `inspect_information_schema` (read-only).  
+> Processing: deterministic tool execution.  
+> Error strategy: retry up to 3 times on connection error, escalate on schema missing.
 
 This description is runtime-agnostic. The Builder can implement it as:
 
 - A LangGraph node (if the agent uses LangGraph)
-- A Python function in a pipeline script (if the agent is a simple pipeline)
-- A processing handler in a Kafka consumer (if the agent is a streaming processor)
+- A Python function in a sequential runner (if the agent uses Python + LiteLLM)
 
 The impl docs specify **what** each stage does. The Builder decides **how** to express it in code for the chosen runtime.
 
 ### 7.3 Builder Generation Strategies
 
-The Builder is not a single monolithic code generator. It has **generation strategies** — one per supported runtime. The Architect's runtime selection determines which strategy the Builder uses.
+The Builder is not a single monolithic code generator. It has **generation strategies** — one per supported runtime (`langgraph`, `python_litellm`). The Architect's runtime selection determines which strategy the Builder uses.
 
 Each strategy knows:
 
 - How to structure a project for that runtime (file layout, entry point, configuration shape)
-- How to express a stage in that runtime (LangGraph node vs. Python function vs. Kafka handler)
-- How to express data contracts in that runtime (Pydantic models, schema validators, etc.)
-- How to express gates and error routing in that runtime (state machine conditional edges vs. try/catch branching vs. DLQ routing)
-- How to wire stages together (graph edges vs. function calls vs. message routing)
+- How to express a stage in that runtime (LangGraph node vs. Python function)
+- How to express data contracts in that runtime (Instructor Pydantic models)
+- How to express gates and error routing in that runtime (state machine conditional edges vs. try/catch branching)
+- How to wire stages together (graph edges vs. function calls)
 
 The Builder reads the impl docs (which are the same regardless of runtime) and applies the selected strategy to produce the agent's codebase.
 
@@ -671,6 +669,8 @@ The Validator runs a series of checks: contract compliance, quality assertion co
 
 **Phase 8 — Delivery**
 
+Phase 8 is executed as an **explicit deterministic Coordinator node** (not a callback hook; see Decision 30). This ensures transactional guarantees: if Git operations, Tier 2 registry updates, or RAG embeddings encounter an issue, the failure surfaces immediately rather than being swallowed.
+
 The coordinator writes all generated files to the agent's project directory. Crucially, the complete `impl_docs/` package (`agent.yaml`, `stages/`, `contracts/`, `config.yaml`, `tests.yaml`) is committed directly into the generated agent's Git repository alongside the generated code as its permanent, authoritative source of truth. The initial `spec.yaml` is archived in the metadata framework (Tier 1 artifact registry) as an immutable Day-0 intake audit record and is retired from active lifecycle use.
 
 The coordinator registers the agent, new shared components, and cross-agent dependencies in the metadata framework (Tier 2 catalog and lineage), and presents a delivery summary to the user.
@@ -686,8 +686,8 @@ The architecture decision and its outcome are stored as a "past architecture dec
 The change flow reuses the same specialists and infrastructure, but operates directly on the agent's `impl_docs/`:
 
 **Two Change Intake Paths:**
-1. **GitOps Direct Edit (PR Workflow)**: A developer modifies one or more files in `impl_docs/*.yaml` directly (e.g. adding a column to `contracts/customer_raw.yaml` or updating an error retry threshold in `stages/stage_validate.yaml`) and opens a Pull Request. CI or the Meta-Agent CLI triggers impact analysis and rebuild.
-2. **Conversational Edit (Chainlit UI)**: A user submits a change request in natural language (e.g., *"Add customer_segmentation field to the validated customer contract and route VIP customers to a priority queue"*). The Spec Analyst interprets the request against the current `impl_docs/`.
+1. **GitOps Direct Edit (PR Workflow)**: A developer modifies one or more files in `impl_docs/*.yaml` directly (e.g. adding a column to `contracts/source_schema_profile.yaml` or updating an error retry threshold in `stages/stage_plan.yaml`) and opens a Pull Request. CI or the Meta-Agent CLI triggers impact analysis and rebuild.
+2. **Conversational Edit (Chainlit UI)**: A user submits a change request in natural language (e.g., *"Add semantic layer metric declarations to the generated dbt models and route VIP models to a dedicated schema"*). The Spec Analyst interprets the request against the current `impl_docs/`.
 
 **Phase 1 — Setup**: Load catalog, component, and contract lineage context from the metadata framework (Tier 2).
 
@@ -773,7 +773,7 @@ meta-agent/
 │   └── patterns/                # Base architecture pattern catalog definitions
 │
 ├── knowledge/                   # RAG knowledge base raw sources & corpus
-│   ├── library_docs/            # Tool & library docs (Snowflake, PySpark, Kafka, etc.)
+│   ├── library_docs/            # Tool & library docs (LiteLLM, Instructor, dbt, SQLGlot, etc.)
 │   ├── org_standards/           # Corporate data policies, governance rules, security
 │   ├── pattern_catalog/         # Documented agent architecture patterns & trade-offs
 │   ├── past_decisions/          # Past build architecture proposals & outcomes
@@ -797,8 +797,8 @@ meta-agent/
 │   │   ├── documentarian/       # YAML implementation document generation
 │   │   ├── builder/             # Code generation engine (Dual-tier: Compiler + Leaf Coder)
 │   │   │   ├── compiler/        # Deterministic Scaffold Compiler (Jinja2 + Python AST)
-│   │   │   │   └── templates/   # Runtime templates (langgraph, python_pipeline, streaming)
-│   │   │   └── leaf_coder/      # LLM Leaf Coder (Custom handlers & test synthesis)
+│   │   │   │   └── templates/   # Runtime templates (langgraph, python_litellm)
+│   │   │   └── leaf_coder/      # LLM Leaf Coder (Custom tools, prompts & test synthesis)
 │   │   └── validator/           # Build verification (contract, governance, test checks)
 │   │
 │   ├── state/                   # State definitions and blackboard projections
@@ -873,9 +873,10 @@ All architecture-level decisions made in this document:
 | 18 | Schema provisioning | DCM Schema Engine (Alembic + SQLGlot) | Deterministic schema compiler and migration tool from declarative YAML contracts. Strips probabilistic LLMs from DDL execution, ensures 100% reproducible GitOps migrations. See [`dcm-agent/dcm_agent.md`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/dcm-agent/dcm_agent.md). |
 | 19 | Metadata retention | Keep everything | Permanent retention across all tiers for MVP. Archival/aggregation policies deferred until volume demands it. |
 | 20 | Retire spec.yaml post-build | Single source of truth in `impl_docs/` committed to agent Git repo | Eliminates dual-spec drift. `spec.yaml` is strictly Day-0 intake. Day-2 maintenance modifies `impl_docs/` directly (via Git PR or natural language), never requiring parallel spec synchronization. |
-| 21 | Builder Architecture: Split Compiler + Leaf Coder | Deterministic Scaffold Compiler (Jinja2+AST) + LLM Leaf Coder | Replaced monolithic LLM code generator. Emits read-only orchestration skeleton deterministically from YAML, invokes LLM only for bespoke leaf handlers. Guarantees 100% syntax and contract determinism while keeping imperative logic hotfixable. See [`builder.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/builder.md). |
-| 22 | Pass Pointers, Not Payloads, in Graph State (Claim Check) | Lightweight `ContractPointer` (URI, count, sha256) | Passing multi-megabyte record lists causes OOM and checkpointer bloat. Claim Check pattern (`PAT-01`) stores bulk data externally and passes tamper-evident hashes. |
+| 21 | Builder Architecture: Split Compiler + Leaf Coder | Deterministic Scaffold Compiler (Jinja2+AST) + LLM Leaf Coder | Replaced monolithic LLM code generator. Emits read-only orchestration skeleton deterministically from YAML, invokes LLM only for bespoke leaf tools and prompts. Guarantees 100% syntax and contract determinism while keeping imperative logic hotfixable. See [`builder.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/builder.md). |
+| 22 | Pass Pointers, Not Payloads, in Graph State (Claim Check) | Lightweight `ContractPointer` (URI, count, sha256) | Passing multi-megabyte artifact files causes checkpointer bloat. Claim Check pattern (`PAT-01`) stores large artifacts externally and passes tamper-evident hashes. |
 | 23 | Retire Standalone Governance; Enterprise Policy Consumer Model | 5-file `impl_docs/` (`agent`, `stages`, `contracts`, `config`, `tests`) + Contract Tagging + Metadata Callbacks | PII tokenization is an edge/catalog concern (Collibra, Snowflake DDM), not bespoke pipeline regexes. Audit is handled via Metadata Framework callbacks. Agents consume enterprise policy rather than compiling bespoke governance modules. |
+| 24 | Layer 2 DDLC AI Agent Modeling | Canonical agent: `dbt_pipeline_builder_agent` | Cleanly separates Layer 2 (AI agents that build/operate data pipelines) from Layer 3 (data pipelines themselves). Generated agents operate on typed state/artifact contracts via Instructor, execute agentic tools, and enforce human gates. |
 
 ---
 

@@ -110,7 +110,7 @@ This is the full template. Every field includes an inline comment explaining its
 # ──────────────────────────────────────────────────────────────────────────────
 agent:
   name: ""                          # [REQUIRED] Snake_case identifier. Must be unique across the agent portfolio.
-                                    # Example: "customer_data_pipeline"
+                                    # Example: "dbt_pipeline_builder_agent"
 
   version: ""                       # [REQUIRED] Semantic version. Use "1.0.0" for new agents.
                                     # Example: "1.0.0"
@@ -122,15 +122,15 @@ agent:
     and the high-level data flow in 2-5 sentences.
 
   owner: ""                         # [REQUIRED] Team or individual responsible for this agent.
-                                    # Example: "data-engineering-team"
+                                    # Example: "analytics-engineering-team"
 
   domain: ""                        # [REQUIRED] Business domain this agent serves.
                                     # Valid values: customer, finance, product, marketing, operations, 
                                     # supply_chain, hr, compliance, analytics, infrastructure, other
-                                    # Example: "customer"
+                                    # Example: "analytics"
 
   tags: []                          # [OPTIONAL] Freeform tags for discoverability.
-                                    # Example: ["etl", "daily", "pii", "warehouse"]
+                                    # Example: ["dbt", "code_generation", "gitops"]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -154,9 +154,8 @@ architecture:
 
   runtime_preference: ""            # [OPTIONAL] Preferred runtime for the generated agent.
                                     # Valid values:
-                                    #   "langgraph"        — stateful agent with LangGraph state machine (PAT-01)
-                                    #   "python_pipeline"  — linear high-throughput Python pipeline
-                                    #   "streaming"        — event-driven streaming worker (Kafka / PubSub)
+                                    #   "langgraph"        — stateful agent with tool-calling loops and gates (PAT-01)
+                                    #   "python_litellm"   — lightweight linear or CLI agent powered by LiteLLM
                                     #   "no_preference"    — let the Architect decide based on requirements
                                     # If omitted, defaults to "no_preference".
                                     # The Architect may override this if requirements demand it.
@@ -176,19 +175,17 @@ architecture:
 # ──────────────────────────────────────────────────────────────────────────────
 stages:
   - id: ""                          # [REQUIRED] Unique snake_case identifier for this stage.
-                                    # Example: "ingest_raw_data"
+                                    # Example: "discover_sources"
 
     type: ""                        # [REQUIRED] Category of work this stage performs.
                                     # Valid values:
-                                    #   "ingestion"       — pulls data from external source
-                                    #   "validation"      — checks data quality and applies contract rules
-                                    #   "transformation"  — reshapes, computes, or derives data
-                                    #   "enrichment"      — joins external datasets or calculates business metrics
-                                    #   "publication"     — writes data to destination warehouse or store
-                                    #   "aggregation"     — combines data from multiple sources
-                                    #   "notification"    — sends alerts or status updates
-                                    #   "monitoring"      — observes and reports on data/system state
-                                    #   "custom"          — bespoke processing (describe in detail)
+                                    #   "discovery"        — inspects database catalogs, schemas, or APIs
+                                    #   "reasoning"        — LLM planning, decision making, or architectural synthesis
+                                    #   "code_generation"  — LLM synthesizes SQL, Python, or configuration files
+                                    #   "sandbox_testing"  — executes dry-runs, lints, or sandbox compilations
+                                    #   "human_review"     — halts for human approval before side-effecting actions
+                                    #   "delivery"         — pushes branches, opens PRs, or registers catalog entries
+                                    #   "custom"           — bespoke processing (describe in detail)
 
     description: >                  # [REQUIRED] What this stage does, in plain English.
                                     # Include: purpose, edge cases, expected behavior on failure.
@@ -201,47 +198,45 @@ stages:
                                     #   "semi_autonomous" — pauses for human approval if validation fails
                                     #   "human_required"  — pauses unconditionally for human approval at a gate
 
-    input_contract: ""              # [REQUIRED] Name of the input data contract (defined in the
-                                    # contracts section below). Must match a contract id exactly.
-                                    # Example: "customer_raw"
+    input_contract: ""              # [REQUIRED for non-initial stages] Name of input contract.
+                                    # Example: "source_schema_profile"
 
-    output_contract: ""             # [REQUIRED] Name of the output data contract.
-                                    # Example: "customer_validated"
+    output_contract: ""             # [REQUIRED for non-terminal stages] Name of output contract.
+                                    # Example: "transformation_plan"
 
     tools: []                       # [OPTIONAL] Specific tools or libraries this stage should use.
                                     # The Researcher validates availability and compatibility.
-                                    # Example: ["great_expectations", "pandas"]
+                                    # Example: ["sqlglot", "litellm", "dbt-core"]
 
     error_strategy: ""              # [OPTIONAL] How to handle errors in this stage.
                                     # Valid values:
                                     #   "fail_fast"       — stop the pipeline on first error
-                                    #   "quarantine"      — isolate bad records, continue with good ones
                                     #   "retry"           — retry the operation (with backoff)
+                                    #   "reflect"         — loop back to LLM with error diagnostics
                                     #   "skip"            — log the error and skip to next stage
                                     #   "escalate"        — pause and alert a human
                                     # If omitted, defaults to "fail_fast".
 
-    retry_config:                   # [OPTIONAL] Only relevant if error_strategy is "retry".
+    retry_config:                   # [OPTIONAL] Only relevant if error_strategy is "retry" or "reflect".
       max_retries: 3                # Maximum number of retry attempts.
-      backoff_seconds: 60           # Seconds to wait between retries.
+      backoff_seconds: 30           # Seconds to wait between retries.
 
     description_details: >          # [OPTIONAL] Additional implementation-level details.
-                                    # Use this for specific business rules, algorithms, or
-                                    # transformations that need explicit documentation.
+                                    # Use this for specific prompt instructions, algorithms,
+                                    # or verifier rules that need explicit documentation.
       Any additional detail: specific transformation logic,
-      business rule formulas, lookup table references, etc.
+      business rule formulas, prompt guidance, verifier rules, etc.
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # SECTION 4: Data Contracts
 # ──────────────────────────────────────────────────────────────────────────────
-# Data contracts define the shape and quality expectations for data flowing
-# between stages. Every stage references contracts by id. Contracts ensure
-# the Documentarian and Validator can verify end-to-end data integrity.
+# Data contracts define the shape and quality expectations for data and artifacts
+# flowing between stages. Every stage references contracts by id.
 # ──────────────────────────────────────────────────────────────────────────────
 contracts:
   - id: ""                          # [REQUIRED] Unique snake_case identifier. Referenced by stages.
-                                    # Example: "customer_raw"
+                                    # Example: "source_schema_profile"
 
     description: >                  # [REQUIRED] What this data represents and where it comes from.
       Describe the data this contract represents,
@@ -253,14 +248,24 @@ contracts:
                                     #   "output"   — data leaving the agent to a destination
                                     #   "internal" — data passed between stages within the agent
 
+    storage_mode: ""                # [OPTIONAL] How contract payloads are transferred.
+                                    # Valid values: "inline", "claim_check" (Default: "inline")
+                                    #   "inline"      — passed directly in node state / memory
+                                    #   "claim_check" — written to disk/storage; state passes pointer metadata
+
     fields:                         # [REQUIRED] List of fields in this contract.
       - name: ""                    # [REQUIRED] Field name. Example: "customer_id"
         type: ""                    # [REQUIRED] Data type.
                                     # Valid values: "string", "integer", "float", "boolean",
-                                    #   "date", "datetime", "timestamp", "json", "array", "binary"
+                                    #   "date", "datetime", "timestamp", "json", "array", "object", "binary"
         nullable: false             # [OPTIONAL] Whether this field can be null. Default: false.
         description: >              # [REQUIRED] What this field represents.
           Describe the business meaning of this field.
+
+        items:                      # [OPTIONAL] For "array" or "object" types: item schema or nested model.
+          type: ""                  # Element type (e.g., "string", "object")
+          model_name: ""            # [OPTIONAL for object] Deterministic Pydantic sub-model name (e.g. "StagingModelSpec")
+          fields: []                # [OPTIONAL for object] Nested field definitions following this same structure
 
         quality_rules: []           # [OPTIONAL] Quality rules applied to this field.
                                     # Each rule is a string describing the check.
@@ -273,8 +278,8 @@ contracts:
                                     #   - "must be positive"
 
     sla:                            # [OPTIONAL] Service-level expectations for this contract.
-      max_records: null             # Maximum expected record count per batch. Null = no limit.
-      min_records: null             # Minimum expected record count per batch. Null = no minimum.
+      max_items: null               # Maximum expected items or records. Null = no limit.
+      min_items: null               # Minimum expected items or records. Null = no minimum.
       freshness_hours: null         # Data must not be older than this many hours. Null = no requirement.
 
 
@@ -331,9 +336,9 @@ infrastructure:
   sources:                          # [REQUIRED] Where the agent reads data from.
     - name: ""                      # [REQUIRED] Descriptive name. Example: "raw_customer_s3_bucket"
       system: ""                    # [REQUIRED] System type.
-                                    # Valid values: "s3", "gcs", "azure_blob", "sftp", "http_api",
+                                    # Valid values: "git_repo", "data_catalog", "dbt_project", "relational_db",
                                     #   "postgres", "mysql", "snowflake", "bigquery", "redshift",
-                                    #   "kafka", "rabbitmq", "kinesis", "local_filesystem", "other"
+                                    #   "s3", "gcs", "azure_blob", "sftp", "http_api", "local_filesystem", "other"
       connection: ""                # [REQUIRED] Connection identifier or URI pattern.
                                     # Do NOT put credentials here — use a config reference.
                                     # Example: "s3://data-lake/raw/customers/"
@@ -355,10 +360,9 @@ infrastructure:
 
   scheduling:                       # [OPTIONAL] When the agent should run.
     type: ""                        # Valid values:
+                                    #   "on_demand"    — triggered manually or via API invocation
                                     #   "cron"         — cron-scheduled recurring execution
-                                    #   "event_driven" — triggered by external event (message, file arrival)
-                                    #   "manual"       — triggered manually by a human
-                                    #   "continuous"   — always running (streaming)
+                                    #   "event_driven" — triggered by external event (webhook, Git push, PR)
     schedule: ""                    # Cron expression if type is "cron". Example: "0 6 * * *" (daily 6AM)
     timezone: ""                    # Timezone for the cron schedule. Example: "UTC"
     description: >                  # Additional scheduling context.
@@ -387,19 +391,19 @@ cross_agent:
 
   downstream_consumers: []          # [OPTIONAL] Agents that consume this agent's output.
                                     # Example:
-                                    #   - agent: "customer_analytics_dashboard"
-                                    #     contract: "customer_enriched"
-                                    #     description: "Dashboard reads enriched customer data"
+                                    #   - agent: "dbt_ci_test_runner"
+                                    #     contract: "delivery_manifest"
+                                    #     description: "CI pipeline that triggers integration tests on opened Pull Requests"
 
   shared_components: []             # [OPTIONAL] Existing shared components to reuse.
                                     # The Architect verifies these exist in the component registry.
                                     # Example:
-                                    #   - name: "audit_logger"
+                                    #   - name: "metadata_telemetry_callback"
                                     #     version: "1.0.0"
-                                    #     usage: "Audit logging to metadata framework tables"
-                                    #   - name: "s3_reader"
-                                    #     version: "1.3.0"
-                                    #     usage: "Use for ingesting CSV files from S3"
+                                    #     usage: "Tier 1 agent run logging and prompt token telemetry"
+                                    #   - name: "gitops_pr_client"
+                                    #     version: "2.1.0"
+                                    #     usage: "Shared GitHub/GitLab PR automation wrapper"
 
   description: >                    # [OPTIONAL] Additional cross-agent context.
     Describe the agent's role in the broader data ecosystem.
@@ -411,15 +415,14 @@ cross_agent:
 # ──────────────────────────────────────────────────────────────────────────────
 constraints:
   required_libraries: []            # [OPTIONAL] Libraries that MUST be used.
-                                    # Example: ["great_expectations", "pandas", "boto3"]
+                                    # Example: ["litellm", "instructor", "sqlglot", "dbt-core"]
 
   avoided_libraries: []             # [OPTIONAL] Libraries that MUST NOT be used.
-                                    # Example: ["pyspark"]  # (too heavy for this use case)
+                                    # Example: ["pyspark", "langchain_community"]
 
   performance:                      # [OPTIONAL] Performance requirements.
     max_latency_seconds: null       # Maximum acceptable end-to-end latency per run. Null = no SLA.
-    min_throughput_records: null     # Minimum records processed per second. Null = no requirement.
-    max_batch_size: null            # Maximum records per batch. Null = no limit.
+    max_cost_per_run_usd: null      # Maximum acceptable LLM token cost per run in USD. Null = no limit.
 
   sla:                              # [OPTIONAL] Service-level agreements.
     availability_percent: null      # Target uptime (e.g., 99.9). Null = no SLA.
@@ -436,586 +439,413 @@ constraints:
 
 ## 4. A Complete Filled Example
 
-The following is a realistic, fully filled-in spec for a "Customer Data Pipeline" agent — the same agent referenced in the approach document's YAML example (Section 8).
+The following is a realistic, fully filled-in spec for a "dbt Pipeline Builder Agent" — the canonical Layer 2 DDLC AI Agent referenced across the architecture and implementation documentation.
 
 ```yaml
 # ============================================================================
-# Customer Data Pipeline — Agent Specification
+# dbt Pipeline Builder Agent — Agent Specification
 # ============================================================================
-# This is a completed spec for a daily batch pipeline that ingests customer
-# CSV data from S3, validates quality, masks PII, enriches with derived
-# fields, and publishes to the Snowflake analytics warehouse.
+# This is a completed spec for an AI agent that inspects source relational
+# database catalogs, plans transformation models, synthesizes dbt SQL and
+# schema YAML files, dry-runs them in an isolated DuckDB/Snowflake sandbox,
+# halts for human approval, and opens a Git Pull Request with the pipeline.
 # ============================================================================
 
 agent:
-  name: "customer_data_pipeline"
+  name: "dbt_pipeline_builder_agent"
   version: "1.0.0"
   description: >
-    Ingests raw customer CSVs from S3, validates data quality,
-    masks PII fields (email, phone), enriches records with derived
-    fields (customer tenure, lifecycle stage), and publishes clean
-    data to the Snowflake analytics warehouse. Runs daily at 6AM UTC.
-    Feeds the customer analytics dashboard and the marketing
-    segmentation engine.
-  owner: "data-engineering-team"
-  domain: "customer"
-  tags: ["etl", "daily", "pii", "warehouse", "batch"]
+    Inspects source database schemas, reasons over transformation requirements,
+    generates modular dbt SQL models with YAML documentation and schema tests,
+    dry-runs and validates compilation in an isolated development sandbox,
+    presents generated artifacts for human review, and delivers the approved
+    pipeline directly as a Git Pull Request. Runs on demand or via CI/CD events.
+  owner: "analytics-engineering-team"
+  domain: "analytics"
+  tags: ["dbt", "code_generation", "analytics_engineering", "gitops", "llm"]
 
 architecture:
   autonomy_level: "semi_autonomous"
-  complexity: "moderate"
-  runtime_preference: "no_preference"
+  complexity: "complex"
+  runtime_preference: "langgraph"
   description: >
-    The pipeline has four stages: ingestion, validation, enrichment, and publication.
-    The publish stage requires human approval before warehouse merges (PAT-01).
-    Error handling quarantines bad records rather than failing the entire batch —
-    we prefer partial loads over no loads. Data sensitivity is governed via contract tags.
+    Stateful LangGraph agent structured with explicit reflection loops and a human
+    review gate. Stage 1 introspects source catalog tables; Stage 2 reasons over
+    business requirements to build an AST model plan; Stage 3 synthesizes dbt SQL
+    and YAML; Stage 4 executes sandbox compilation and linting, looping back to Stage 3
+    on syntax or model errors (max 3 retries); Stage 5 halts unconditionally for human
+    approval; Stage 6 commits code to a Git branch and opens a Pull Request.
 
 stages:
-  - id: "ingest_from_s3"
-    type: "ingestion"
+  - id: "discover"
+    type: "discovery"
     description: >
-      Pulls daily CSV drops from the S3 raw data bucket. Files arrive
-      between 4-5AM UTC. The stage should handle schema evolution by
-      logging new or missing columns as warnings rather than failing.
-      Multiple files per day are possible — process all files matching
-      the date partition pattern.
+      Connects to source database information schemas and data catalogs to discover
+      tables, column names, data types, primary keys, and foreign key relationships.
+      Produces a structured source schema profile for downstream reasoning.
     autonomy: "autonomous"
-    input_contract: "customer_raw_files"
-    output_contract: "customer_raw"
-    tools: ["boto3", "pandas"]
+    input_contract: "source_database_reference"
+    output_contract: "source_schema_profile"
+    tools: ["inspect_information_schema", "query_catalog_lineage"]
     error_strategy: "retry"
     retry_config:
       max_retries: 3
-      backoff_seconds: 120
+      backoff_seconds: 30
     description_details: >
-      S3 path pattern: s3://data-lake/raw/customers/dt={YYYY-MM-DD}/
-      File naming: customers_{timestamp}.csv
-      Expected encoding: UTF-8
-      Expected delimiter: comma
-      Header row: always present
+      Target databases: PostgreSQL OLTP schemas (public, sales, inventory).
+      Extract column comments, nullability constraints, and relational cardinalities.
+      Handle connection timeouts gracefully with exponential backoff.
 
-  - id: "validate_quality"
-    type: "validation"
+  - id: "plan"
+    type: "reasoning"
     description: >
-      Validates all ingested records against quality rules defined in
-      the customer_raw contract. Records that fail validation are
-      quarantined to a separate table for manual review. The stage
-      produces a quality summary with pass/fail counts per rule.
+      Analyzes the source schema profile alongside business transformation goals.
+      Formulates a multi-layer dbt modeling DAG (staging, intermediate, marts)
+      specifying model names, materialization strategies, and join dependencies.
     autonomy: "autonomous"
-    input_contract: "customer_raw"
-    output_contract: "customer_validated"
-    tools: ["great_expectations"]
-    error_strategy: "quarantine"
+    input_contract: "source_schema_profile"
+    output_contract: "transformation_plan"
+    tools: ["query_tier2_contracts", "sqlglot_analyze_lineage"]
+    error_strategy: "reflect"
+    retry_config:
+      max_retries: 2
+      backoff_seconds: 10
     description_details: >
-      Quality gate: proceed only if >= 95% of records pass all rules.
-      Below 95%: quarantine failures, send alert, proceed with valid records.
-      Below 80%: halt the pipeline and escalate to the data engineering team.
+      Model tiers must strictly adhere to the analytics engineering style guide:
+      stg_ (views), int_ (ephemeral or tables), fct_ / dim_ (tables or incremental).
+      Identifies primary key uniqueness tests and relationship tests for each model.
 
-  - id: "enrich_derived_fields"
-    type: "enrichment"
+  - id: "generate"
+    type: "code_generation"
     description: >
-      Enriches customer records with derived fields: customer_tenure
-      (days since signup), lifecycle_stage (new/active/dormant/churned
-      based on last_activity_date), and customer_value_tier (based on
-      lifetime_spend). These derived fields power the marketing
-      segmentation engine.
+      Synthesizes dbt Jinja-SQL model files and companion YAML schema files
+      (containing column descriptions, sources, and dbt generic tests)
+      based on the approved transformation plan.
     autonomy: "autonomous"
-    input_contract: "customer_validated"
-    output_contract: "customer_enriched"
-    tools: ["pandas"]
-    error_strategy: "quarantine"
+    input_contract: "transformation_plan"
+    output_contract: "dbt_artifact_bundle"
+    tools: ["render_jinja_template", "sqlglot_format_sql"]
+    error_strategy: "reflect"
+    retry_config:
+      max_retries: 3
+      backoff_seconds: 5
     description_details: >
-      Lifecycle stage logic:
-        - "new": signed up within last 30 days
-        - "active": last activity within 90 days
-        - "dormant": last activity 91-365 days ago
-        - "churned": no activity for > 365 days
-      Customer value tier logic:
-        - "platinum": credit_score >= 750 AND lifetime_spend > 10000
-        - "gold": credit_score >= 700 OR lifetime_spend > 5000
-        - "silver": all other active customers
+      Generates models/staging, models/marts, and models/schema.yml.
+      Enforces SQLGlot dialect safety (e.g. Snowflake or DuckDB).
+      Bundles all generated files into a Claim Check bundle URI.
 
-  - id: "publish_to_warehouse"
-    type: "publication"
+  - id: "dry_run"
+    type: "sandbox_testing"
     description: >
-      Writes enriched customer data to the Snowflake analytics warehouse.
-      Uses a merge/upsert strategy keyed on customer_id — updates existing
-      records and inserts new ones. Applies Snowflake column tags from contracts.
+      Executes dbt compile and dbt test against an isolated sandbox environment
+      (or DuckDB runner) to verify SQL syntax, macro resolution, and DAG validity.
+      On syntax or compilation error, feeds diagnostic tracebacks back to Stage 3.
+    autonomy: "autonomous"
+    input_contract: "dbt_artifact_bundle"
+    output_contract: "compilation_report"
+    tools: ["run_dbt_compile", "run_sqlglot_validate"]
+    error_strategy: "reflect"
+    retry_config:
+      max_retries: 3
+      backoff_seconds: 15
+    description_details: >
+      Executes in an ephemeral sandbox. Captures compiler stdout, stderr, and SQLGlot
+      AST parse diagnostics. If dbt compile exits non-zero, reflects back to
+      generate with the exact failing model path and compiler error.
+
+  - id: "review"
+    type: "human_review"
+    description: >
+      Pauses execution at an explicit human-in-the-loop gate. Presents the generated
+      dbt models, YAML documentation, and sandbox compilation report to an analytics
+      engineer for visual inspection and sign-off.
     autonomy: "human_required"
-    input_contract: "customer_enriched"
-    output_contract: "customer_warehouse"
-    tools: ["snowflake-connector-python"]
-    error_strategy: "fail_fast"
+    input_contract: "compilation_report"
+    output_contract: "reviewed_artifact_bundle"
+    tools: ["render_diff_summary"]
+    error_strategy: "escalate"
     description_details: >
-      Target table: analytics.customers.customer_profile
-      History table: analytics.customers.customer_profile_history
-      Merge key: customer_id
-      SCD Type 2 tracked columns: customer_value_tier, lifecycle_stage
-      Batch size: 10000 records per INSERT/MERGE batch
+      Invokes LangGraph interrupt() to serialize state to the PostgreSQL checkpoint table.
+      Surfaces git diffs and lineage diagrams in Chainlit or Web UI. Resumes on human approval.
+
+  - id: "deliver"
+    type: "delivery"
+    description: >
+      Creates a new Git branch, commits all validated dbt models and schema YAML files,
+      pushes the branch to the remote repository, and opens a Pull Request with a
+      comprehensive markdown summary of models, tests, and lineage.
+    autonomy: "autonomous"
+    input_contract: "reviewed_artifact_bundle"
+    output_contract: "delivery_manifest"
+    tools: ["create_git_branch", "commit_files", "open_pull_request"]
+    error_strategy: "fail_fast"
+    retry_config:
+      max_retries: 2
+      backoff_seconds: 20
+    description_details: >
+      Branch naming pattern: feat/dbt-models-{run_id}.
+      PR body includes transformation summary, source references, and test checklist.
 
 contracts:
-  - id: "customer_raw_files"
+  - id: "source_database_reference"
     description: >
-      Raw CSV files as they arrive in S3. This contract describes the
-      expected file-level metadata, not the record schema (which is
-      defined in customer_raw).
+      Initial input parameters specifying target source databases, schemas,
+      and connection references for catalog introspection.
     direction: "input"
     fields:
-      - name: "file_path"
+      - name: "database_name"
         type: "string"
-        nullable: false
-        description: >
-          Full S3 URI of the source CSV file.
-        quality_rules:
-          - "must match pattern s3://data-lake/raw/customers/dt=\\d{4}-\\d{2}-\\d{2}/"
-      - name: "file_size_bytes"
+        description: "Name of the source database catalog (e.g., 'production_oltp')"
+        quality_rules: ["must not be empty"]
+      - name: "schema_names"
+        type: "array"
+        description: "List of database schema names to introspect"
+        quality_rules: ["must contain at least one schema"]
+      - name: "connection_ref"
+        type: "string"
+        description: "Configuration reference key for database credentials in secrets store"
+        quality_rules: ["must start with secret:// or config://"]
+
+  - id: "source_schema_profile"
+    description: >
+      Introspected catalog metadata describing tables, columns, data types,
+      keys, and constraints discovered across source schemas.
+    direction: "internal"
+    fields:
+      - name: "tables"
+        type: "array"
+        description: "List of discovered tables with column definitions and primary keys"
+        quality_rules: ["must contain at least one table definition"]
+      - name: "foreign_keys"
+        type: "array"
+        description: "Inferred and declared relational foreign keys across tables"
+      - name: "profiled_at"
+        type: "timestamp"
+        description: "UTC timestamp when the database inspection completed"
+
+  - id: "transformation_plan"
+    description: >
+      Structured architectural plan generated by the LLM reasoning stage outlining
+      the DAG of dbt models to build, join strategies, and test definitions.
+    direction: "internal"
+    fields:
+      - name: "project_name"
+        type: "string"
+        description: "Target dbt project identifier"
+        quality_rules: ["must not be empty"]
+      - name: "target_dialect"
+        type: "string"
+        description: "SQL dialect for the models (e.g. snowflake, postgres, duckdb)"
+        quality_rules: ["must be a supported SQLGlot dialect"]
+      - name: "staging_models"
+        type: "array"
+        description: "List of staging models mapping source tables with 1:1 clean views"
+        items:
+          type: "object"
+          model_name: "StagingModelSpec"
+          fields:
+            - name: "model_name"
+              type: "string"
+              description: "Staging model identifier (e.g., stg_customers)"
+            - name: "source_table"
+              type: "string"
+              description: "Source table identifier"
+            - name: "columns"
+              type: "array"
+              items:
+                type: "string"
+              description: "Projected column list"
+      - name: "marts_models"
+        type: "array"
+        description: "List of dimensional/fact mart models joining staging sources"
+        items:
+          type: "object"
+          model_name: "MartModelSpec"
+          fields:
+            - name: "model_name"
+              type: "string"
+              description: "Mart model identifier (e.g., fct_orders)"
+            - name: "materialization"
+              type: "string"
+              default: "table"
+              description: "dbt materialization strategy (table, view, incremental)"
+            - name: "description"
+              type: "string"
+              description: "Business documentation for the mart model"
+            - name: "staging_dependencies"
+              type: "array"
+              items:
+                type: "string"
+              description: "Upstream staging models referenced"
+      - name: "total_models_planned"
         type: "integer"
-        nullable: false
-        description: >
-          Size of the file in bytes. Used to detect empty or truncated uploads.
-        quality_rules:
-          - "must be greater than 0"
-      - name: "upload_timestamp"
-        type: "timestamp"
-        nullable: false
-        description: >
-          S3 object last-modified timestamp. Used for freshness checks.
-        quality_rules:
-          - "must be within the last 36 hours"
+        description: "Count of models planned for synthesis"
+        quality_rules: ["must be between 1 and 100"]
 
-  - id: "customer_raw"
+  - id: "dbt_artifact_bundle"
     description: >
-      Individual customer records parsed from the raw CSV files. This is the
-      record-level schema before any validation or transformation.
+      Claim Check reference pointing to the bundle of synthesized dbt SQL models,
+      macros, and schema.yml specification files written to staging disk.
+    direction: "internal"
+    storage_mode: "claim_check"
+    fields:
+      - name: "bundle_id"
+        type: "string"
+        description: "Unique UUID for the artifact bundle"
+        quality_rules: ["must be a valid UUIDv4"]
+      - name: "storage_uri"
+        type: "string"
+        description: "File or object storage URI pointing to the artifact archive"
+        quality_rules: ["must be a valid file:// or s3:// URI"]
+      - name: "file_manifest"
+        type: "array"
+        description: "List of relative file paths contained in the generated bundle"
+        quality_rules: ["must contain at least one .sql model and one .yml schema"]
+      - name: "artifact_sha256"
+        type: "string"
+        description: "Cryptographic hash of the bundle archive for tamper-proof verification"
+        quality_rules: ["must match regex ^[a-f0-9]{64}$"]
+
+  - id: "compilation_report"
+    description: >
+      Execution diagnostics from the sandbox compilation and validation run,
+      including dbt compile stdout, linting status, and error traces.
     direction: "internal"
     fields:
-      - name: "customer_id"
+      - name: "bundle_id"
         type: "string"
-        nullable: false
-        description: >
-          Unique customer identifier assigned by the source CRM system.
-          Format: two uppercase letters followed by six digits (e.g., CU000123).
-        quality_rules:
-          - "must be unique across the dataset"
-          - "must match regex ^[A-Z]{2}\\d{6}$"
-      - name: "first_name"
-        type: "string"
-        nullable: false
-        description: >
-          Customer's first name as recorded in the CRM.
-        quality_rules:
-          - "must not be empty string"
-      - name: "last_name"
-        type: "string"
-        nullable: false
-        description: >
-          Customer's last name as recorded in the CRM.
-        quality_rules:
-          - "must not be empty string"
-      - name: "email"
-        type: "string"
-        nullable: false
-        description: >
-          Customer's primary email address. PII — classified for platform masking policies.
-        quality_rules:
-          - "must be a valid email address"
-      - name: "phone_number"
-        type: "string"
-        nullable: true
-        description: >
-          Customer's phone number. PII — classified for platform masking policies.
-          Not all customers provide a phone number.
-        quality_rules: []
-      - name: "signup_date"
-        type: "date"
-        nullable: false
-        description: >
-          Date the customer first signed up. Used to calculate tenure.
-        quality_rules:
-          - "must not be in the future"
-          - "must be after 2015-01-01"
-      - name: "last_activity_date"
-        type: "date"
-        nullable: true
-        description: >
-          Date of the customer's most recent interaction. Null means
-          no recorded activity since CRM migration.
-        quality_rules:
-          - "if not null, must not be in the future"
-      - name: "total_purchases"
+        description: "Reference to the dbt_artifact_bundle evaluated"
+      - name: "success"
+        type: "boolean"
+        description: "True if all models compiled cleanly with zero syntax or test errors"
+      - name: "compilation_errors"
+        type: "array"
+        description: "List of compiler or parser errors encountered, if any"
+      - name: "sandbox_runtime_seconds"
         type: "float"
-        nullable: false
-        description: >
-          Lifetime total purchase amount in USD.
-        quality_rules:
-          - "must be >= 0"
-      - name: "created_at"
-        type: "timestamp"
-        nullable: false
-        description: >
-          Timestamp when this record was created/exported by the CRM.
-        quality_rules:
-          - "must be within the last 48 hours"
-    sla:
-      max_records: 500000
-      min_records: 1000
-      freshness_hours: 36
+        description: "Duration of sandbox execution in seconds"
 
-  - id: "customer_validated"
+  - id: "reviewed_artifact_bundle"
     description: >
-      Customer records that passed all quality validation rules.
-      Same schema as customer_raw — this contract exists to mark the
-      boundary between raw and validated data.
+      Signed-off artifact bundle post-human review gate, containing human approval
+      metadata and any reviewer feedback.
     direction: "internal"
     fields:
-      - name: "customer_id"
+      - name: "bundle_id"
         type: "string"
-        nullable: false
-        description: >
-          Validated customer identifier.
-        quality_rules:
-          - "must be unique across the dataset"
-      - name: "first_name"
+        description: "Reference to the approved dbt_artifact_bundle"
+      - name: "approved_by"
         type: "string"
-        nullable: false
-        description: >
-          Validated first name.
-        quality_rules: []
-      - name: "last_name"
-        type: "string"
-        nullable: false
-        description: >
-          Validated last name.
-        quality_rules: []
-      - name: "email"
-        type: "string"
-        nullable: false
-        description: >
-          Validated email address. Still contains raw PII at this stage.
-        quality_rules: []
-      - name: "phone_number"
-        type: "string"
-        nullable: true
-        description: >
-          Validated phone number. Still contains raw PII at this stage.
-        quality_rules: []
-      - name: "signup_date"
-        type: "date"
-        nullable: false
-        description: >
-          Validated signup date.
-        quality_rules: []
-      - name: "last_activity_date"
-        type: "date"
-        nullable: true
-        description: >
-          Validated last activity date.
-        quality_rules: []
-      - name: "total_purchases"
-        type: "float"
-        nullable: false
-        description: >
-          Validated purchase total.
-        quality_rules: []
-      - name: "created_at"
+        description: "User ID or email of the approving engineer"
+        quality_rules: ["must not be empty"]
+      - name: "approval_timestamp"
         type: "timestamp"
-        nullable: false
-        description: >
-          Record creation timestamp.
-        quality_rules: []
+        description: "UTC timestamp when human approval was granted"
 
-  - id: "customer_enriched"
+  - id: "delivery_manifest"
     description: >
-      Customer records after enrichment with derived fields. This is the
-      shape that enters the analytics warehouse.
-    direction: "internal"
-    fields:
-      - name: "customer_id"
-        type: "string"
-        nullable: false
-        description: >
-          Customer identifier.
-        quality_rules:
-          - "must be unique across the dataset"
-      - name: "first_name"
-        type: "string"
-        nullable: false
-        description: >
-          Customer first name.
-        quality_rules: []
-      - name: "last_name"
-        type: "string"
-        nullable: false
-        description: >
-          Customer last name.
-        quality_rules: []
-      - name: "email_masked"
-        type: "string"
-        nullable: false
-        description: >
-          Masked email address.
-        quality_rules: []
-      - name: "phone_masked"
-        type: "string"
-        nullable: true
-        description: >
-          Masked phone number.
-        quality_rules: []
-      - name: "signup_date"
-        type: "date"
-        nullable: false
-        description: >
-          Original signup date.
-        quality_rules: []
-      - name: "last_activity_date"
-        type: "date"
-        nullable: true
-        description: >
-          Most recent activity date.
-        quality_rules: []
-      - name: "total_purchases"
-        type: "float"
-        nullable: false
-        description: >
-          Lifetime purchase total in USD.
-        quality_rules: []
-      - name: "customer_tenure_days"
-        type: "integer"
-        nullable: false
-        description: >
-          Derived: number of days since signup_date.
-          Calculated as (current_date - signup_date).days.
-        quality_rules:
-          - "must be >= 0"
-      - name: "lifecycle_stage"
-        type: "string"
-        nullable: false
-        description: >
-          Derived: customer lifecycle classification based on
-          last_activity_date. Values: new, active, dormant, churned.
-        quality_rules:
-          - "must be one of: new, active, dormant, churned"
-      - name: "customer_value_tier"
-        type: "string"
-        nullable: false
-        description: >
-          Derived: value tier based on total_purchases.
-          Values: platinum, gold, silver, bronze.
-        quality_rules:
-          - "must be one of: platinum, gold, silver, bronze"
-      - name: "created_at"
-        type: "timestamp"
-        nullable: false
-        description: >
-          Record creation timestamp from source.
-        quality_rules: []
-      - name: "enriched_at"
-        type: "timestamp"
-        nullable: false
-        description: >
-          Timestamp when enrichment was applied.
-        quality_rules:
-          - "must not be in the future"
-
-  - id: "customer_warehouse"
-    description: >
-      Final output contract for the Snowflake analytics warehouse.
-      Identical to customer_enriched — this contract exists to mark
-      the data as published and to serve as the contract that
-      downstream consumers reference.
+      Output manifest documenting the delivered Git repository branch, commit SHA,
+      and opened Pull Request URL.
     direction: "output"
     fields:
-      - name: "customer_id"
+      - name: "repository"
         type: "string"
-        nullable: false
-        description: >
-          Primary key in the warehouse table.
-        quality_rules:
-          - "must be unique across the dataset"
-      - name: "first_name"
+        description: "Git repository slug (e.g. 'org/analytics-dbt-repo')"
+        quality_rules: ["must match regex ^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$"]
+      - name: "branch_name"
         type: "string"
-        nullable: false
-        description: >
-          Customer first name.
-        quality_rules: []
-      - name: "last_name"
+        description: "Git branch where artifacts were committed"
+        quality_rules: ["must start with feat/"]
+      - name: "commit_sha"
         type: "string"
-        nullable: false
-        description: >
-          Customer last name.
-        quality_rules: []
-      - name: "email_masked"
+        description: "Git commit hash of the committed files"
+        quality_rules: ["must match regex ^[a-f0-9]{40}$"]
+      - name: "pull_request_url"
         type: "string"
-        nullable: false
-        description: >
-          Masked email address. No raw PII in the warehouse.
-        quality_rules: []
-      - name: "phone_masked"
-        type: "string"
-        nullable: true
-        description: >
-          Masked phone number. No raw PII in the warehouse.
-        quality_rules: []
-      - name: "signup_date"
-        type: "date"
-        nullable: false
-        description: >
-          Customer signup date.
-        quality_rules: []
-      - name: "last_activity_date"
-        type: "date"
-        nullable: true
-        description: >
-          Most recent activity date.
-        quality_rules: []
-      - name: "total_purchases"
-        type: "float"
-        nullable: false
-        description: >
-          Lifetime purchase total.
-        quality_rules: []
-      - name: "customer_tenure_days"
-        type: "integer"
-        nullable: false
-        description: >
-          Days since signup.
-        quality_rules: []
-      - name: "lifecycle_stage"
-        type: "string"
-        nullable: false
-        description: >
-          Lifecycle classification.
-        quality_rules: []
-      - name: "customer_value_tier"
-        type: "string"
-        nullable: false
-        description: >
-          Value tier classification.
-        quality_rules: []
-      - name: "created_at"
-        type: "timestamp"
-        nullable: false
-        description: >
-          Record creation timestamp from source.
-        quality_rules: []
-      - name: "enriched_at"
-        type: "timestamp"
-        nullable: false
-        description: >
-          Timestamp when enrichment was applied.
-        quality_rules: []
-      - name: "published_at"
-        type: "timestamp"
-        nullable: false
-        description: >
-          Timestamp when this record was written to the warehouse.
-        quality_rules: []
-    sla:
-      max_records: 500000
-      min_records: 1000
-      freshness_hours: 24
+        description: "URL of the created Pull Request"
+        quality_rules: ["must be a valid URL"]
 
 governance:
-  pii_fields: ["email", "phone_number"]
-  pii_strategy: "mask"
+  approval_gates: ["review"]
   audit_requirements:
     enabled: true
-    log_level: "standard"
+    log_level: "comprehensive"
     retention_days: 365
-  approval_gates: ["publish_to_warehouse"]
   compliance_rules:
-    - "Internal policy: no raw PII in the analytics warehouse"
-    - "Data retention: raw source files in S3 retained for 90 days"
-    - "GDPR: support data subject deletion requests via customer_id lookup"
-  data_classification: "confidential"
+    - "All generated SQL must conform to company analytics engineering naming conventions"
+    - "No hardcoded credentials or plaintext secrets in dbt profiles or connection strings"
+    - "Every staging and marts model must include at least one unique test and one not_null test"
+    - "Side-effecting Git delivery operations require unconditional human-in-the-loop review"
+  data_classification: "internal"
   description: >
-    This pipeline handles customer PII. PII attributes (email, phone) are
-    tagged on contracts so that Snowflake Dynamic Data Masking policies
-    govern access dynamically. Telemetry is captured via Metadata Framework.
-    The publish stage requires human approval before warehouse merges.
+    Agent-generated code and Pull Requests are subject to GitOps peer review.
+    All LLM prompt/completion spans, tool invocations, and human approval timestamps
+    are recorded in the Tier 1 metadata operational telemetry database.
 
 infrastructure:
   sources:
-    - name: "raw_customer_s3_bucket"
-      system: "s3"
-      connection: "s3://data-lake/raw/customers/"
-      format: "csv"
-      description: >
-        Daily CSV exports from the CRM system. Files arrive between
-        4-5AM UTC. Typically 50-200K records per file. One to three
-        files per day. UTF-8 encoded, comma-delimited, with headers.
-  destinations:
-    - name: "snowflake_analytics"
-      system: "snowflake"
-      connection: "snowflake://analytics_warehouse/customers"
+    - name: "production_oltp_postgres"
+      system: "postgres"
+      connection: "config://databases.postgres_oltp"
       format: "database_table"
       description: >
-        Snowflake analytics warehouse. Target schema: analytics.customers.
-        The data engineering team has write access. The analytics and
-        marketing teams have read access.
+        Read-only replica of the transactional OLTP database for catalog
+        introspection and information_schema queries.
+  destinations:
+    - name: "analytics_git_repo"
+      system: "git_repo"
+      connection: "config://git.target_repo_uri"
+      format: "git_repo"
+      description: >
+        Enterprise GitHub / GitLab repository housing the dbt analytics engineering project.
   scheduling:
-    type: "cron"
-    schedule: "0 6 * * *"
-    timezone: "UTC"
+    type: "on_demand"
     description: >
-      Runs daily at 6AM UTC, after the CRM export window (4-5AM).
-      Must complete before 8AM UTC when the analytics dashboard
-      refreshes. Weekend runs are expected but lower volume.
+      Invoked on demand by analytics engineers via CLI, Slack, or webhook trigger
+      when onboarding new source tables or refactoring data models.
   resource_constraints:
-    max_memory_gb: 8
-    max_cpu_cores: 4
-    max_execution_minutes: 60
+    max_memory_gb: 4.0
+    max_cpu_cores: 2
+    max_execution_minutes: 15
     description: >
-      Runs on the shared data engineering Kubernetes cluster.
-      Memory and CPU are bounded to avoid starving other pipelines.
-      If processing exceeds 60 minutes, something is wrong — alert.
+      Lightweight compute requirements. Code generation and LLM reasoning run via
+      LiteLLM API calls. Sandbox compilation runs in isolated local DuckDB memory.
 
 cross_agent:
   upstream_dependencies: []
   downstream_consumers:
-    - agent: "customer_analytics_dashboard"
-      contract: "customer_warehouse"
-      description: >
-        The analytics dashboard reads enriched customer data from
-        Snowflake every hour. Schema changes must be coordinated.
-    - agent: "marketing_segmentation_engine"
-      contract: "customer_warehouse"
-      description: >
-        The marketing engine reads lifecycle_stage and customer_value_tier
-        for audience segmentation. Breaking changes to these fields
-        will break segmentation rules.
+    - agent: "dbt_ci_test_runner"
+      contract: "delivery_manifest"
+      description: "CI pipeline that triggers integration tests on opened Pull Requests"
   shared_components:
-    - name: "s3_reader"
-      version: "1.3.0"
-      usage: >
-        Use for reading CSV files from S3 in the ingest_from_s3 stage.
-        Handles multi-file ingestion and schema evolution detection.
-    - name: "audit_logger"
+    - name: "metadata_telemetry_callback"
       version: "1.0.0"
-      usage: >
-        Shared utility for structured application event logging.
+      usage: "Tier 1 agent run logging and prompt token telemetry"
+    - name: "gitops_pr_client"
+      version: "2.1.0"
+      usage: "Shared GitHub/GitLab PR automation wrapper"
   description: >
-    This pipeline is the primary source of customer data for the analytics
-    warehouse. Two downstream agents depend on its output. Any schema
-    changes to customer_warehouse must be coordinated with both teams.
+    This agent serves as the front-door builder for the analytics data platform.
+    It synthesizes verified dbt code that downstream CI and transformation runners execute.
 
 constraints:
-  required_libraries: ["boto3", "pandas", "great_expectations", "snowflake-connector-python"]
-  avoided_libraries: ["pyspark"]
+  required_libraries:
+    - "litellm"
+    - "instructor"
+    - "sqlglot"
+    - "dbt-core"
+  avoided_libraries:
+    - "pyspark"
+    - "langchain_community"
   performance:
-    max_latency_seconds: 3600
-    min_throughput_records: 1000
-    max_batch_size: 50000
+    max_latency_seconds: 600
   sla:
-    availability_percent: 99.5
-    max_downtime_minutes: 120
-    recovery_time_minutes: 30
+    availability_percent: 99.0
+    max_downtime_minutes: 60
+    recovery_time_minutes: 15
   description: >
-    PySpark is avoided because the data volumes (< 500K records) do not
-    justify the overhead of a Spark cluster. Pandas is sufficient and
-    simpler to maintain. The pipeline must complete within 1 hour to
-    meet the 8AM dashboard refresh SLA.
+    The agent must run idempotently. Repeated runs on the same source schema must produce
+    deterministic model naming and identical AST structures for stable git diffs.
 ```
 
 ---
@@ -1034,29 +864,33 @@ Comprehensive listing of every field path, its type, required/optional status, v
 | `agent.tags` | list[string] | No | Free text | Metadata |
 | `architecture.autonomy_level` | string | Yes | Enum: autonomous, semi_autonomous, human_required | Architect |
 | `architecture.complexity` | string | No | Enum: simple, moderate, complex | Architect |
-| `architecture.runtime_preference` | string | No | Enum: langgraph, python_pipeline, streaming, no_preference | Architect |
+| `architecture.runtime_preference` | string | No | Enum: langgraph, python_litellm, no_preference | Architect |
 | `architecture.description` | string | No | Free text | Architect |
 | `stages[].id` | string | Yes | Snake_case, unique within stages | All specialists |
-| `stages[].type` | string | Yes | Enum: ingestion, validation, transformation, enrichment, publication, aggregation, notification, monitoring, custom | Architect, Documentarian |
+| `stages[].type` | string | Yes | Enum: discovery, reasoning, code_generation, sandbox_testing, human_review, delivery, custom | Architect, Documentarian |
 | `stages[].description` | string | Yes | Free text | Spec Analyst, Documentarian |
 | `stages[].autonomy` | string | Yes | Enum: autonomous, semi_autonomous, human_required | Architect |
 | `stages[].input_contract` | string | Yes | Must reference a contract id | Spec Analyst (chain validation) |
 | `stages[].output_contract` | string | Yes | Must reference a contract id | Spec Analyst (chain validation) |
 | `stages[].tools` | list[string] | No | Free text (Researcher validates) | Researcher |
-| `stages[].error_strategy` | string | No | Enum: fail_fast, quarantine, retry, skip, escalate | Documentarian |
+| `stages[].error_strategy` | string | No | Enum: fail_fast, retry, reflect, skip, escalate | Documentarian |
 | `stages[].retry_config.max_retries` | integer | No | Positive integer | Documentarian |
 | `stages[].retry_config.backoff_seconds` | integer | No | Positive integer | Documentarian |
 | `stages[].description_details` | string | No | Free text | Documentarian |
 | `contracts[].id` | string | Yes | Snake_case, unique | All specialists |
 | `contracts[].description` | string | Yes | Free text | Spec Analyst |
 | `contracts[].direction` | string | Yes | Enum: input, output, internal | Spec Analyst, Documentarian |
+| `contracts[].storage_mode` | string | No | Enum: inline, claim_check (default: inline) | Documentarian, Builder |
 | `contracts[].fields[].name` | string | Yes | Snake_case | Documentarian, Validator |
-| `contracts[].fields[].type` | string | Yes | Enum: string, integer, float, boolean, date, datetime, timestamp, json, array, binary | Documentarian, Builder |
+| `contracts[].fields[].type` | string | Yes | Enum: string, integer, float, boolean, date, datetime, timestamp, json, array, object, binary | Documentarian, Builder |
 | `contracts[].fields[].nullable` | boolean | No | true/false (default: false) | Documentarian, Builder |
 | `contracts[].fields[].description` | string | Yes | Free text | Documentarian |
+| `contracts[].fields[].items` | object | No | Element schema or nested model for array/object types | Documentarian, Builder |
+| `contracts[].fields[].items.model_name` | string | No | PascalCase identifier for deterministic Pydantic sub-model compilation | Documentarian, Builder |
+| `contracts[].fields[].items.fields` | list[object] | No | Nested field list following same field structure | Documentarian, Builder |
 | `contracts[].fields[].quality_rules` | list[string] | No | Free text rules | Documentarian, Validator |
-| `contracts[].sla.max_records` | integer | No | Positive integer or null | Documentarian |
-| `contracts[].sla.min_records` | integer | No | Positive integer or null | Documentarian |
+| `contracts[].sla.max_items` | integer | No | Positive integer or null | Documentarian |
+| `contracts[].sla.min_items` | integer | No | Positive integer or null | Documentarian |
 | `contracts[].sla.freshness_hours` | integer | No | Positive integer or null | Documentarian |
 | `governance.pii_fields` | list[string] | Conditional | Field names from contracts | Documentarian, Validator |
 | `governance.pii_strategy` | string | Conditional | Enum: mask, hash, encrypt, redact, tokenize, none_warehouse_managed | Documentarian |
@@ -1068,16 +902,16 @@ Comprehensive listing of every field path, its type, required/optional status, v
 | `governance.data_classification` | string | No | Enum: public, internal, confidential, restricted | Architect, Documentarian |
 | `governance.description` | string | No | Free text | Spec Analyst |
 | `infrastructure.sources[].name` | string | Yes | Free text | Researcher |
-| `infrastructure.sources[].system` | string | Yes | Enum: s3, gcs, azure_blob, sftp, http_api, postgres, mysql, snowflake, bigquery, redshift, kafka, rabbitmq, kinesis, local_filesystem, other | Researcher |
+| `infrastructure.sources[].system` | string | Yes | Enum: git_repo, data_catalog, dbt_project, relational_db, postgres, mysql, snowflake, bigquery, redshift, s3, gcs, azure_blob, sftp, http_api, local_filesystem, other | Researcher |
 | `infrastructure.sources[].connection` | string | Yes | URI pattern (no credentials) | Documentarian, Builder |
-| `infrastructure.sources[].format` | string | No | Enum: csv, json, jsonl, parquet, avro, orc, xml, database_table, api_response, other | Researcher, Documentarian |
+| `infrastructure.sources[].format` | string | No | Enum: csv, json, jsonl, parquet, avro, orc, xml, database_table, api_response, git_repo, other | Researcher, Documentarian |
 | `infrastructure.sources[].description` | string | No | Free text | Researcher |
 | `infrastructure.destinations[].name` | string | Yes | Free text | Researcher |
 | `infrastructure.destinations[].system` | string | Yes | Same enum as sources | Researcher |
 | `infrastructure.destinations[].connection` | string | Yes | URI pattern (no credentials) | Documentarian, Builder |
 | `infrastructure.destinations[].format` | string | No | Same enum as source format | Researcher, Documentarian |
 | `infrastructure.destinations[].description` | string | No | Free text | Researcher |
-| `infrastructure.scheduling.type` | string | No | Enum: cron, event_driven, manual, continuous | Architect |
+| `infrastructure.scheduling.type` | string | No | Enum: on_demand, cron, event_driven | Architect |
 | `infrastructure.scheduling.schedule` | string | No | Cron expression | Documentarian |
 | `infrastructure.scheduling.timezone` | string | No | Timezone string (e.g., "UTC") | Documentarian |
 | `infrastructure.scheduling.description` | string | No | Free text | Spec Analyst |
@@ -1092,8 +926,7 @@ Comprehensive listing of every field path, its type, required/optional status, v
 | `constraints.required_libraries` | list[string] | No | Library names | Researcher, Builder |
 | `constraints.avoided_libraries` | list[string] | No | Library names | Researcher, Builder |
 | `constraints.performance.max_latency_seconds` | integer | No | Positive integer or null | Architect |
-| `constraints.performance.min_throughput_records` | integer | No | Positive integer or null | Architect |
-| `constraints.performance.max_batch_size` | integer | No | Positive integer or null | Documentarian |
+| `constraints.performance.max_cost_per_run_usd` | float | No | Positive number or null | Architect |
 | `constraints.sla.availability_percent` | float | No | 0-100 or null | Architect |
 | `constraints.sla.max_downtime_minutes` | integer | No | Positive integer or null | Architect |
 | `constraints.sla.recovery_time_minutes` | integer | No | Positive integer or null | Architect |
@@ -1121,10 +954,10 @@ Schema validation is Pydantic-based. It checks structure, types, required fields
 | Stage ids are snake_case | Each `stages[].id` matches `^[a-z][a-z0-9_]*$` | **Reject** |
 | At least one stage defined | `stages` list is non-empty | **Reject** |
 | At least one contract defined | `contracts` list is non-empty | **Reject** |
-| Each stage has input and output contracts | `input_contract` and `output_contract` are non-empty strings | **Reject** |
+| Contract references on stages | Non-initial stages must declare `input_contract`; non-terminal stages must declare `output_contract` | **Reject** |
 | Each contract has at least one field | `fields` list is non-empty | **Reject** |
 | PII strategy required when PII fields listed | If `governance.pii_fields` is non-empty, `governance.pii_strategy` must be set | **Reject** |
-| Retry config valid | If `error_strategy` is "retry", `retry_config` must be present with positive values | **Reject** |
+| Retry config valid | If `error_strategy` is "retry" or "reflect", `retry_config` must be present with positive values | **Reject** |
 
 ### 6.2 Semantic Validation
 
@@ -1138,11 +971,11 @@ Semantic validation uses LLM reasoning to check logical consistency. These check
 | PII field existence | Every field listed in `governance.pii_fields` must exist in at least one contract | **Reject** — references a non-existent field |
 | Approval gate validity | Every stage listed in `governance.approval_gates` must match a stage id | **Reject** — references a non-existent stage |
 | Tool availability | Tools listed in stages should be recognizable libraries/tools | **Clarify** — ask for clarification on unrecognized tools |
-| Source/destination consistency | Stages of type "ingestion" should have a corresponding source in infrastructure; stages of type "publication" should have a corresponding destination | **Clarify** — ask if the infrastructure is missing or intentionally omitted |
+| Source/destination consistency | Stages of type "discovery" or reading from external systems should have a corresponding source in infrastructure; stages of type "delivery" should have a corresponding destination in infrastructure | **Clarify** — ask if the infrastructure is missing or intentionally omitted |
 | Cross-agent reference validation | Agents listed in `upstream_dependencies` and `downstream_consumers` are checked against the metadata framework's agent registry | **Clarify** — ask if the referenced agent exists or is planned |
 | Shared component existence | Components listed in `cross_agent.shared_components` are checked against the component registry | **Clarify** — ask if the component should be created as new |
 | Governance completeness | If `data_classification` is "confidential" or "restricted", are PII rules defined? Is audit logging enabled? | **Clarify** — surface potential governance gaps |
-| Scheduling vs. type consistency | If scheduling type is "continuous", at least one stage should be type "monitoring" or ingestion from a streaming source (kafka, kinesis, rabbitmq) | **Clarify** — ask if the scheduling is correct |
+| Scheduling vs. trigger consistency | If scheduling type is "event_driven", agent must declare an event trigger, webhook, or listener in infrastructure/sources | **Clarify** — ask if the scheduling trigger is fully specified |
 | Description sufficiency | Are description fields detailed enough for downstream specialists? | **Clarify** — ask for more detail on vague descriptions |
 
 ### 6.3 Outcome Categories
@@ -1164,7 +997,7 @@ Semantic validation uses LLM reasoning to check logical consistency. These check
 | 3 | Contracts as a separate section (not embedded in stages) | Standalone contract definitions referenced by stage id | Contracts may be shared across multiple stages. Embedding them in stages would force duplication. Separate contracts also enable cross-stage chain validation and cross-agent lineage tracking. |
 | 4 | Enum fields over free text | Enums for type, autonomy, strategy, system, format, classification | Reduces LLM interpretation burden. The Spec Analyst validates against a known set rather than reasoning about arbitrary strings. Free text is reserved for description fields where intent matters. |
 | 5 | Stage ordering by list position | YAML list implies execution order | Explicit ordering avoids ambiguity. The Architect may reorder or parallelize, but the spec expresses the user's intended sequence. |
-| 6 | Quality rules as free text strings | list[string] with natural language rules | Quality rules are too varied to enumerate as an enum. The Documentarian translates these into concrete Great Expectations rules or custom validators. LLM interpretation is appropriate here. |
+| 6 | Quality rules as free text strings | list[string] with natural language rules | Quality rules are too varied to enumerate as an enum. The Documentarian translates these into concrete Instructor/Pydantic validators, Great Expectations assertions, or AST verifiers. LLM interpretation is appropriate here. |
 | 7 | No credentials in the spec | Connection fields hold URI patterns, not credentials | Credentials belong in config files and secrets managers, never in specification documents. The approach.md rule: no hardcoding. |
 | 8 | Cross-agent references are names, not ids | Reference agents and components by human-readable name | The Spec Analyst and Architect resolve names to registry ids via the metadata framework. Users should not need to know internal ids. |
 | 9 | Governance as a dedicated section | Not distributed across stages | Governance rules often span multiple stages (PII masking in one stage, audit logging across all stages, approval gates at specific stages). Centralizing governance in one section ensures nothing is missed. The Documentarian distributes these to specific enforcement points in the impl docs. |
@@ -1172,6 +1005,7 @@ Semantic validation uses LLM reasoning to check logical consistency. These check
 | 11 | Description fields on nearly everything | description, description_details, and per-section descriptions | The spec must serve both the Pydantic parser (structured fields) and the LLM specialists (intent and context). Description fields bridge the gap — they carry business context that no enum can capture. |
 | 12 | Conditional required fields | PII strategy required only when PII fields listed | Avoids forcing users to fill in governance fields when the agent handles no PII. The Pydantic validator enforces conditional requirements. |
 | 13 | Retire spec.yaml post-build | Day-0 bootstrapping intake form only; retired post-build | Eliminates dual-spec drift. Once an agent is delivered, `impl_docs/*.yaml` in Git is the single source of truth. Day-2 enhancements operate directly on `impl_docs/`, never on `spec.yaml`. |
+| 14 | Layer 2 DDLC AI Agent Modeling | Intake spec models AI agents (e.g. dbt Pipeline Builder Agent) that build and operate data pipelines | Distinguishes Layer 2 (LLM-driven data engineering agents) from Layer 3 (raw batch/streaming data pipelines). Eliminates batch record loop assumptions from agent intake. |
 
 ---
 
@@ -1197,4 +1031,4 @@ The spec is the **broadest input** to the funnel. Everything else is derived fro
 1. **Pydantic schema implementation** — Translate this template into a Pydantic v2 model used by the Spec Analyst for validation (`src/specialists/spec_analyst/models.py`)
 2. **Spec Analyst prompt design** — Prompts that use the parsed Pydantic model to identify gaps and generate clarifying questions
 3. **Impl doc schema** — How the Documentarian translates a validated spec into implementation documents → `impl_doc_schema.md`
-4. **Example spec library** — Additional filled-in specs for different agent types (streaming, simple pipeline, multi-source aggregator) to test the Spec Analyst and Architect
+4. **Example spec library** — Additional filled-in specs for different DDLC AI agent types (e.g., dbt pipeline builder, schema evolution agent, data quality monitor) to test the Spec Analyst and Architect

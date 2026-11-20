@@ -5,19 +5,25 @@
 # ============================================================
 
 tests:
-  agent_ref: "agent_unique_identifier"
+  contract_tests:                              # [OPTIONAL] Contract-derived schema and quality rule validations
+    - contract: "contract_unique_name"         # References contracts/<name>.yaml
+      description: "Tests derived from contract specification"
+      cases:
+        - test_id: "test_schema_valid"
+          type: "schema_validation"            # schema_validation | field_quality
+          description: "Verify required contract fields parse cleanly"
+          auto_generate: true
+        - test_id: "test_field_quality"
+          type: "field_quality"
+          description: "Verify field quality rule constraint"
+          field: "field_name"
+          rule: "allowed_values"               # rule name from contract quality_rules
+          auto_generate: true
 
-  contract_tests:                              # Auto-derived schema and quality rule validations
-    - contract_ref: "contract_unique_name"
-      synthetic_rows: 100
-      assert_zero_schema_violations: true
-
-  stage_tests:                                 # Stage-level unit execution tests
-    - stage_id: "stage_unique_id"
-      mock_inputs: true
-      expected_output_status: "success"
-
-  governance_tests:                            # PII and compliance rule enforcement tests
-    - test_name: "assert_pii_masked"
-      target_stage: "stage_unique_id"
-      assert_pattern: "pii_field_must_not_contain_raw_value"
+  custom_tests:                                # [OPTIONAL] Custom integration, stage, and gate tests
+    - test_id: "custom_integration_test"
+      type: "integration"                      # integration | end_to_end | unit
+      description: "Stage-level or multi-stage integration test"
+      stage: "stage_unique_id"                 # Target stage id
+      setup: "Preparation steps or sandbox fixtures"
+      expected_behavior: "Expected outcome or assertion"

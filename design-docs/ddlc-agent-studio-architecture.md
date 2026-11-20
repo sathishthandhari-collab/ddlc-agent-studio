@@ -94,8 +94,8 @@ The studio decouples developer interaction, factory synthesis, knowledge retriev
 ┌────────────────────────────────────────┐ ┌────────────────────────────────────────────────────────────┐
 │          KNOWLEDGE LAYER (RAG)         │ │            PERSISTENT METADATA & SCHEMA ENGINE             │
 │                                        │ │                                                            │
-│   • Library & Tool Docs (Snowflake,    │ │   ┌────────────────────────────────────────────────────┐   │
-│     PySpark, Kafka, Great Expectations)│ │   │               DCM SCHEMA ENGINE                    │   │
+│   • Library & Tool Docs (LiteLLM,      │ │   ┌────────────────────────────────────────────────────┐   │
+│     Instructor, dbt, SQLGlot, Postgres)│ │   │               DCM SCHEMA ENGINE                    │   │
 │   • Organizational Standards           │ │   │     (Declarative GitOps with SQLGlot + Alembic)    │   │
 │   • Architecture Pattern Catalog       │ │   └─────────────────────────┬──────────────────────────┘   │
 │   • Past Architecture Decisions        │ │                             │ manages & migrates           │
@@ -114,10 +114,10 @@ The studio decouples developer interaction, factory synthesis, knowledge retriev
 ┌─────────────────────────────────────────────────────────────────────────────────────────────────────────┐
 │                                 GENERATED DDLC AGENTS (RUNTIMES ON DISK)                                │
 │                                                                                                         │
-│   ┌───────────────────────────┐ ┌───────────────────────────┐ ┌──────────────────────────────────────┐  │
-│   │   LangGraph State Agent   │ │   Python Script Pipeline  │ │       Streaming Event Agent          │  │
-│   │   (Stage-Gated PAT-01)    │ │   (Batch / Micro-Batch)   │ │       (Kafka / Real-time)            │  │
-│   └───────────────────────────┘ └───────────────────────────┘ └──────────────────────────────────────┘  │
+│   ┌───────────────────────────┐ ┌───────────────────────────┐                                           │
+│   │   LangGraph State Agent   │ │   Python + LiteLLM Agent  │                                           │
+│   │   (Stage-Gated PAT-01)    │ │   (Lightweight Event/CLI) │                                           │
+│   └───────────────────────────┘ └───────────────────────────┘                                           │
 └─────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -174,7 +174,7 @@ flowchart TD
 | **5. Documentation** | **Documentarian** | Authoritative YAML implementation documents detailing every stage, schema, hook, and SLA. | Approved by human at **Gate 3**. |
 | **6. Construction** | **Builder** | Compiles YAML into source code, test suites, and Docker/config manifests per chosen runtime strategy. | Codebase generated on disk. |
 | **7. Validation** | **Validator** | Validates generated code against implementation docs (zero hardcoded values, contracts intact). | All checks pass or **Gate 4** escalation. |
-| **8. Delivery** | **Coordinator** | Deploys agent to `agents/<agent_name>`, updates Tier 2 registries, and appends past decisions to RAG. | Agent ready for operation. |
+| **8. Delivery** | **Coordinator (Explicit Node)** | Deterministic delivery node: Deploys agent to `agents/<agent_name>`, updates Tier 2 registries, and appends past decisions to RAG with transactional fail-fast guarantees (Decision 30). | Agent ready for operation. |
 
 ---
 
@@ -237,18 +237,17 @@ The repository maintains strict boundaries between meta-tooling, metadata manage
 ```
 ddlc-agent-studio/
 ├── .github/                         # CI/CD workflows, GitOps automation
-├── _shared/                         # ALL SHARED ASSETS (Code Components + RAG Knowledge)
-│   ├── components/                  # Reusable Python Code Modules (Tier 2 Catalog Assets)
-│   │   ├── connectors/              # Shared I/O & cloud storage connectors
-│   │   ├── quality/                 # Great Expectations & custom validation rules
-│   │   └── formatters/              # Common schema adapters & serializers
-│   │
-│   └── knowledge/                   # Shared RAG Corpus & Pattern Repository
-│       ├── library_docs/            # Tool references (Snowflake, PySpark, Kafka, dbt)
-│       ├── org_standards/           # Compliance, naming conventions, governance policies
-│       ├── pattern_catalog/         # Catalog of agent architecture patterns (PAT-01, etc.)
-│       ├── past_decisions/          # Stored build outcomes and architectural trade-offs
-│       └── code_conventions/        # Coding styles, testing guidelines, packaging rules
+├── _shared/                         # Reusable Shared Code Components (Tier 2 Catalog Assets)
+│   ├── connectors/                  # Shared I/O & catalog connectors
+│   ├── verifiers/                   # AST & contract validation rules
+│   └── formatters/                  # Common schema adapters & serializers
+│
+├── knowledge/                       # Shared RAG Corpus & Pattern Repository
+│   ├── library_docs/                # Tool references (LiteLLM, Instructor, dbt, SQLGlot)
+│   ├── org_standards/               # Compliance, naming conventions, governance policies
+│   ├── pattern_catalog/             # Catalog of agent architecture patterns (PAT-01, etc.)
+│   ├── past_decisions/              # Stored build outcomes and architectural trade-offs
+│   └── code_conventions/            # Coding styles, testing guidelines, packaging rules
 │
 ├── config/                          # Studio-wide environment & LLM tier configurations
 │   ├── settings.yaml                # Database connections, workspace root paths
@@ -385,17 +384,17 @@ The Meta-Agent is runtime-agnostic. The Documentarian produces implementation do
                        │ (Selects Generation Strategy)│
                        └──────────────┬───────────────┘
                                       │
-         ┌────────────────────────────┼────────────────────────────┐
-         ▼                            ▼                            ▼
-┌──────────────────┐         ┌──────────────────┐         ┌──────────────────┐
-│ LangGraph State  │         │  Python Pipeline │         │ Streaming Event  │
-│ Machine Strategy │         │     Strategy     │         │     Strategy     │
-├──────────────────┤         ├──────────────────┤         ├──────────────────┤
-│ Staged-Gated     │         │ Linear batch     │         │ Real-time Kafka  │
-│ Pipeline(PAT-01) │         │ processing       │         │ consumer/producer│
-│ Human gates,     │         │ Scheduled cron,  │         │ Continuous       │
-│ recovery branches│         │ low-complexity   │         │ micro-batches    │
-└──────────────────┘         └──────────────────┘         └──────────────────┘
+                    ┌─────────────────┴─────────────────┐
+                    ▼                                   ▼
+          ┌───────────────────────────┐       ┌───────────────────────────┐
+          │   LangGraph State Agent   │       │   Python + LiteLLM Agent  │
+          │     Generation Strategy   │       │     Generation Strategy   │
+          ├───────────────────────────┤       ├───────────────────────────┤
+          │ Stateful multi-step graph │       │ Lightweight linear runner │
+          │ ReAct tool loops & AST    │       │ CLI / Webhook triggers    │
+          │ Self-correction reflection│       │ Fast execution            │
+          │ Human approval gates      │       │ Zero checkpointer cost    │
+          └───────────────────────────┘       └───────────────────────────┘
 ```
 
 ---
@@ -411,7 +410,7 @@ As of today, no individual DDLC agents have been built or finalized. This sectio
 | **Meta-Agent Architecture** | Approved (v0.4) | In Development | [architecture.md](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/architecture.md) |
 | **Metadata Framework (Tier 1 & 2)** | Approved (v0.2) | Contract Complete | [01_metadata_framework.md](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/metadata-framework/01_metadata_framework.md) |
 | **DCM Schema Engine** | Approved (v0.2) | Compiler Scaffolded | [dcm_agent.md](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/dcm-agent/dcm_agent.md) |
-| **RAG Knowledge Base & Embeddings** | Architecture Defined| Pending Corpus Ingestion | `_shared/knowledge/` |
+| **RAG Knowledge Base & Embeddings** | Architecture Defined| Pending Corpus Ingestion | `knowledge/` |
 | **DDLC Target Agents** | **Planning Phase** | **Not Started** | Section 7.2 below |
 
 ---
@@ -424,30 +423,30 @@ The table below outlines candidate DDLC agents being considered for upcoming dev
 ┌────────────────────────────────────────────────────────────────────────────────────────┐
 │                              DDLC AGENT CANDIDATE REGISTRY                             │
 │                                                                                        │
-│  [AGT-01] Ingestion & Source Extractor Agent                                           │
-│  Connects to upstream endpoints (S3, Kafka, APIs), extracts source schemas, profiles    │
-│  source data, and writes raw staging contracts.                                        │
-│  Status: CANDIDATE  •  Target Runtime: Python / Streaming                              │
+│  [AGT-01] Ingestion Pipeline Onboarding Agent                                          │
+│  Introspects source endpoints (S3, Kafka, APIs), extracts source schemas, profiles     │
+│  source data, and synthesizes declarative ingestion pipelines and staging contracts.   │
+│  Status: CANDIDATE  •  Target Runtime: LangGraph / Python + LiteLLM                     │
 │                                                                                        │
 │  [AGT-02] Data Quality & Contract Enforcement Agent                                    │
-│  Runs automated Great Expectations assertions, verifies contract schemas, quarantines  │
-│  invalid rows, and logs quality scores to Tier 2 metadata.                             │
+│  Synthesizes Great Expectations suites and automated contract assertions for pipelines,│
+│  evaluates data quality anomalies, and recommends contract remediations.               │
 │  Status: CANDIDATE  •  Target Runtime: LangGraph Staged-Gated (PAT-01)                 │
 │                                                                                        │
 │  [AGT-03] Data Classification & Catalog Sync Agent                                     │
 │  Connects to enterprise governance platforms (Collibra, Unity Catalog, Snowflake tags), │
 │  syncs column sensitivity tags, and audits platform access policy compliance.          │
-│  Status: CANDIDATE  •  Target Runtime: Python CLI / Event                              │
+│  Status: CANDIDATE  •  Target Runtime: Python + LiteLLM (Event/CLI)                    │
 │                                                                                        │
 │  [AGT-04] Schema Evolution & Migration Agent                                           │
-│  Detects upstream schema drift, alerts on breaking type conversions, and coordinates   │
-│  with DCM Engine to evolve downstream staging tables safely.                          │
-│  Status: CANDIDATE  •  Target Runtime: Python CLI / Event                              │
+│  Detects upstream schema drift, reasons over breaking type changes, and coordinates    │
+│  with DCM Engine to synthesize and execute versioned Alembic/SQL migrations.           │
+│  Status: CANDIDATE  •  Target Runtime: Python + LiteLLM (Event/CLI)                    │
 │                                                                                        │
-│  [AGT-05] Data Transformation & Warehouse Delivery Agent                               │
-│  Orchestrates dbt model execution, executes idempotent warehouse merges into Snowflake/ │
-│  Databricks, and establishes final consumption contracts.                              │
-│  Status: CANDIDATE  •  Target Runtime: Python Pipeline / Dagster                       │
+│  [AGT-05] dbt Pipeline Builder Agent (Canonical Reference Agent)                       │
+│  Introspects source catalogs, plans transformation models, synthesizes dbt SQL and     │
+│  YAML schemas, validates in a sandbox, halts at human gates, and opens Git PRs.        │
+│  Status: REFERENCE AGENT  •  Target Runtime: LangGraph Stateful Agent with Gates       │
 └────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -469,4 +468,4 @@ As you progress through studio development:
 > - [Unified Three-Tier Metadata Framework](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/metadata-framework/01_metadata_framework.md)
 > - [Tier 1 Metadata Data Dictionary](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/metadata-framework/tier_1_data_dictionary.md)
 > - [DCM Schema Engine Design (Alembic + SQLGlot)](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/dcm-agent/dcm_agent.md)
-> - [Stage-Gated Pipeline Pattern (`PAT-01`)](file:///S:/DATA/agents/ddlc-agent-studio/agent-architecture-patterns/stage-gated/01-staged-gated-pipeline.md)
+> - [Stage-Gated Pipeline Pattern (`PAT-01`)](file:///S:/DATA/agents/ddlc-agent-studio/agent-architecture-patterns/01-staged-gated-pipeline.md)

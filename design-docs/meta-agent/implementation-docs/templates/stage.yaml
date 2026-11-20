@@ -1,62 +1,62 @@
 # ============================================================
-# stage.yaml — Pipeline Stage Template (Blank)
+# stage.yaml — Agent Stage Template (Blank)
 # ============================================================
-# Canonical specification of one processing stage.
+# Canonical specification of one agent stage.
 # Top-level sections: stage, input, output, processing, error_strategy, performance.
 # ============================================================
 
 stage:
   id: "stage_unique_id"                        # [REQUIRED] Matches pipeline.stages[].stage_id in agent.yaml
   name: "Human Readable Stage Name"            # [REQUIRED] Display name for logging & telemetry
-  type: "transformation"                       # [REQUIRED] ingestion | validation | transformation | enrichment | publication | aggregation | notification
+  type: "reasoning"                            # [REQUIRED] discovery | reasoning | code_generation | sandbox_testing | human_review | delivery | custom
   description: >                               # [REQUIRED] What this stage does (WHAT, not HOW)
     Plain English description of stage responsibility.
   autonomy: "autonomous"                       # [REQUIRED] autonomous | semi_autonomous | human_required
-  transform_handler: "handlers/stage_handler.py::process" # [OPTIONAL] Hook for Leaf Coder custom imperative logic (<file>::<func>)
 
 input:
-  contract: "input_contract_name"              # [REQUIRED for non-ingest] References contracts/<name>.yaml
-  source:                                      # [OPTIONAL] External connection if ingestion stage
-    type: "s3"                                 # s3 | gcs | azure_blob | database | api | kafka | local_file
-    uri: "${config.sources.raw_source.uri}"
-    format: "csv"                              # csv | json | parquet | avro | relational
-    options:
-      delimiter: ","
-      header: true
+  contract: "input_contract_name"              # [REQUIRED for non-initial] References contracts/<name>.yaml
+  source:                                      # [OPTIONAL] External connection if initial stage
+    type: "database"                           # database | catalog | git | api | file
+    uri: "${config.sources.primary_db.uri}"
 
 output:
-  contract: "output_contract_name"             # [REQUIRED for non-publication] References contracts/<name>.yaml
-  destination:                                 # [OPTIONAL] External connection if publication stage
-    type: "database"                           # database | snowflake | s3 | kafka
-    uri: "${config.destinations.target.uri}"
-    table: "schema.table_name"
-    write_mode: "append"                       # append | overwrite | upsert | merge
+  contract: "output_contract_name"             # [REQUIRED for non-terminal] References contracts/<name>.yaml
+  destination:                                 # [OPTIONAL] External target if terminal stage
+    type: "git"                                # git | catalog | database | api | file
+    uri: "${config.destinations.target_repo.uri}"
 
 processing:
-  execution_mode: "batch"                      # [REQUIRED] batch (vectorized Polars/Pandas) | chunked (bounded generator) | row (per-message Pydantic)
-  dataframe_engine: "polars"                   # [OPTIONAL] polars (default) | pandas (used when execution_mode is batch)
-  chunk_size: null                             # [OPTIONAL] Integer (e.g. 10000) when execution_mode is chunked
-  logic_description: >                         # [REQUIRED if transform_handler set] Algorithmic description for Leaf Coder
-    Step-by-step description of transformations and calculations.
-  tools:                                       # [OPTIONAL] Tools invoked within this stage
+  processing_type: "llm_reasoning"             # [REQUIRED] llm_reasoning | deterministic_tool | human_gate
+  llm_config:                                  # [REQUIRED if processing_type is llm_reasoning]
+    model_tier: "reasoning"                    # speed | reasoning | heavy
+    prompt_template_ref: "prompts/prompt.jinja2" # Path to Jinja2 prompt template
+    output_schema: "output_contract_name"      # Instructor Pydantic contract name
+    temperature: 0.0                           # Sampling temperature
+    max_tokens: 4096                           # Token generation limit
+    cost_cap_usd: 0.50                         # Cost ceiling in USD
+  tools:                                       # [OPTIONAL] Agentic tools bound to this stage
     - name: "tool_name"
-      purpose: "Why this tool is called"
+      type: "builtin"                          # builtin | custom_code | shared_component
+      handler: null                            # [OPTIONAL for custom_code] Hook synthesized by Leaf Coder: tools/<mod>.py::<func>
+      signature: null                          # [OPTIONAL for custom_code] Explicit typed signature: (arg: type) -> return_type
+      purpose: "Why this tool is called by LLM or stage runner"
+      access: "read_only"                      # read_only | side_effecting
+      requires_approval: false                 # Whether invoking tool triggers human approval gate
       configuration: {}
-  shared_components:                           # [OPTIONAL] Reusable components from Tier 2 catalog
-    - name: "component_name"
-      usage_type: "import"                     # import | extend | wrap
+  safety_valves:                               # [OPTIONAL] Loop bounds and timeout controls
+    max_tool_iterations: 5                     # Max tool calling iterations in ReAct loop
+    max_reflection_retries: 3                  # Max self-correction retries on compilation/lint error
+    timeout_seconds: 300                       # Stage hard timeout
+  logic_description: >                         # [OPTIONAL] Algorithmic description projected to Leaf Coder or stage node logic
+    Step-by-step description of transformations, rules, and logic.
 
 error_strategy:
   on_error:                                    # [REQUIRED] Default or scenario-keyed error handlers
-    action: "fail"                             # retry | quarantine | skip | fail | warn | alert
+    action: "retry"                            # retry | fail | skip | escalate | reflect
     max_retries: 3
-    retry_delay_seconds: 60
+    retry_delay_seconds: 30
     escalation: "fail"
 
 performance:
-  expected_record_count:
-    min: 0
-    max: 500000
-    alert_on_exceed: true
-  expected_duration_seconds: 300
-  timeout_seconds: 600
+  expected_duration_seconds: 30
+  timeout_seconds: 120
