@@ -1,4 +1,4 @@
-"""Tests for DCM safety gate — destructive operation detection."""
+"""Tests for DCM safety gate — destructive operation detection and literal/comment stripping."""
 
 from src.dcm.safety import (
     DDLClassification,
@@ -7,6 +7,7 @@ from src.dcm.safety import (
     analyze_migration,
     classify_statement,
     gate_check,
+    strip_sql_literals_and_comments,
 )
 
 
@@ -16,6 +17,7 @@ class TestClassifyStatement:
     def test_create_schema_is_safe(self):
         result = classify_statement('CREATE SCHEMA IF NOT EXISTS "agent_metadata";')
         assert result.risk_level == RiskLevel.SAFE
+        assert result.reason == "Non-destructive DDL operation"
 
     def test_create_table_is_safe(self):
         result = classify_statement(
@@ -48,13 +50,27 @@ class TestClassifyStatement:
             "BEGIN RETURN NEW; END; $$ LANGUAGE plpgsql;"
         )
         assert result.risk_level == RiskLevel.SAFE
+        assert result.reason == "Non-destructive DDL operation"
 
-    def test_create_trigger_is_safe(self):
+    def test_create_or_replace_trigger_is_explicitly_safe(self):
         result = classify_statement(
             'CREATE OR REPLACE TRIGGER "trg_test" BEFORE UPDATE ON "s"."t" '
             "FOR EACH ROW EXECUTE FUNCTION myschema.my_func();"
         )
         assert result.risk_level == RiskLevel.SAFE
+        assert result.reason == "Non-destructive DDL operation"
+
+    def test_drop_keywords_inside_string_or_dollar_quote_do_not_false_positive(self):
+        fn = (
+            'CREATE OR REPLACE FUNCTION "s"."guard"() RETURNS TRIGGER AS $$\n'
+            "BEGIN\n"
+            "    RAISE EXCEPTION 'DROP TABLE and TRUNCATE are forbidden';\n"
+            "END;\n"
+            "$$ LANGUAGE plpgsql;"
+        )
+        result = classify_statement(fn)
+        assert result.risk_level == RiskLevel.SAFE
+        assert "DROP TABLE" not in strip_sql_literals_and_comments(fn)
 
     def test_drop_table_is_destructive(self):
         result = classify_statement('DROP TABLE "agent_metadata"."test";')
@@ -73,6 +89,33 @@ class TestClassifyStatement:
             'ALTER TABLE "s"."t" ALTER COLUMN "col" TYPE VARCHAR(200);'
         )
         assert result.risk_level == RiskLevel.DESTRUCTIVE
+
+    def test_postgres_table_rename_is_destructive(self):
+        result = classify_statement('ALTER TABLE "s"."tbl" RENAME TO "tbl_new";')
+        assert result.risk_level == RiskLevel.DESTRUCTIVE
+        assert "RENAME" in result.reason
+
+    def test_postgres_column_rename_is_destructive(self):
+        result = classify_statement('ALTER TABLE "s"."tbl" RENAME COLUMN "a" TO "b";')
+        assert result.risk_level == RiskLevel.DESTRUCTIVE
+
+    def test_postgres_constraint_rename_is_destructive(self):
+        result = classify_statement('ALTER TABLE "s"."tbl" RENAME CONSTRAINT "c1" TO "c2";')
+        assert result.risk_level == RiskLevel.DESTRUCTIVE
+
+    def test_postgres_schema_rename_is_destructive(self):
+        result = classify_statement('ALTER SCHEMA "s" RENAME TO "s_new";')
+        assert result.risk_level == RiskLevel.DESTRUCTIVE
+
+    def test_drop_trigger_and_function_are_destructive(self):
+        assert (
+            classify_statement('DROP TRIGGER IF EXISTS "trg" ON "s"."t";').risk_level
+            == RiskLevel.DESTRUCTIVE
+        )
+        assert (
+            classify_statement('DROP FUNCTION IF EXISTS "s"."fn"();').risk_level
+            == RiskLevel.DESTRUCTIVE
+        )
 
     def test_truncate_is_destructive(self):
         result = classify_statement('TRUNCATE "agent_metadata"."test";')

@@ -1,18 +1,21 @@
 """DCM Schema Engine package (SQLGlot compiler + Alembic migration manager)."""
 
-from src.dcm.compiler import (
+from .compiler import (
     ContractValidationError,
     compile_contract,
     compile_contracts,
     compile_to_sql,
     load_contract,
     load_contracts_from_dir,
+    normalize_pg_type,
     resolve_pg_type,
     sort_contracts_by_dependencies,
+    types_equivalent,
     validate_contracts_integrity,
+    validate_sql_ast,
 )
-from src.dcm.engine import SchemaEngine
-from src.dcm.migrator import (
+from .engine import SchemaEngine
+from .migrator import (
     CatalogSnapshot,
     DestructiveMigrationError,
     DiffOp,
@@ -24,9 +27,8 @@ from src.dcm.migrator import (
     get_current_revision,
     get_migration_status,
     introspect_database,
-    types_equivalent,
 )
-from src.dcm.models import (
+from .models import (
     CheckConstraintSpec,
     ColumnSpec,
     DataContractSchema,
@@ -38,7 +40,7 @@ from src.dcm.models import (
     parse_index_column,
     parse_reference,
 )
-from src.dcm.safety import (
+from .safety import (
     DDLClassification,
     RiskLevel,
     SafetyReport,
@@ -66,6 +68,9 @@ __all__ = [
     "load_contract",
     "load_contracts_from_dir",
     "resolve_pg_type",
+    "normalize_pg_type",
+    "types_equivalent",
+    "validate_sql_ast",
     "sort_contracts_by_dependencies",
     "validate_contracts_integrity",
     "compile_contract",
@@ -83,7 +88,6 @@ __all__ = [
     "apply_migrations",
     "get_current_revision",
     "get_migration_status",
-    "types_equivalent",
     # Safety
     "RiskLevel",
     "DDLClassification",

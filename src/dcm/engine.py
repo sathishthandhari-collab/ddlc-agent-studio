@@ -12,12 +12,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from src.dcm.compiler import (
+from .compiler import (
     load_contract,
     load_contracts_from_dir,
     validate_contracts_integrity,
 )
-from src.dcm.migrator import (
+from .migrator import (
+    DestructiveMigrationError,
     MigrationPlan,
     apply_migrations,
     compute_migration_plan,
@@ -27,7 +28,8 @@ from src.dcm.migrator import (
     get_migration_status,
     introspect_database,
 )
-from src.dcm.models import DataContractSchema
+from .models import DataContractSchema
+from .safety import gate_check
 
 
 class SchemaEngine:
@@ -111,10 +113,10 @@ class SchemaEngine:
         message: str,
         approve_destructive: bool = False,
     ) -> Optional[str]:
-        """Validate, generate Alembic revision, and apply migration atomically.
+        """Validate, pre-check safety gate, generate Alembic revision, and apply migration.
 
-        Returns:
-            Applied Alembic revision ID, or None if schema was already up to date.
+        Pre-validates the computed diff through the safety gate BEFORE writing an
+        Alembic file so blocked destructive migrations never leave dangling revisions.
         """
         target = Path(contract_path)
         contracts = (
@@ -122,6 +124,16 @@ class SchemaEngine:
             if target.is_dir()
             else [self.validate_contract(target)]
         )
+        schemas = [c.schema_name for c in contracts]
+        catalog = introspect_database(self.db_url, schemas)
+        migration_plan = compute_migration_plan(contracts, catalog)
+        if migration_plan.is_empty:
+            return None
+
+        report = migration_plan.safety_report()
+        if not gate_check(report, approve_destructive=approve_destructive):
+            raise DestructiveMigrationError(report)
+
         rev_path = create_revision(
             db_uri=self.db_url,
             message=message,

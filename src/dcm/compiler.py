@@ -1,8 +1,8 @@
 """DCM Contract Compiler — deterministic YAML → PostgreSQL DDL via SQLGlot.
 
 Pipeline:
-  YAML file → Pydantic DataContractSchema → In-memory FK/Constraint Validation
-  → SQLGlot AST Type/DDL Validation → Ordered PostgreSQL DDL strings
+  YAML file → Pydantic DataContractSchema → In-memory FK/Type/Key Validation
+  → SQLGlot AST Validation → Ordered PostgreSQL DDL strings
 """
 
 from __future__ import annotations
@@ -15,22 +15,23 @@ import sqlglot
 import yaml
 from sqlglot import exp
 
-from src.dcm.models import (
+from .models import (
     ColumnSpec,
     DataContractSchema,
     IndexSpec,
     TableSpec,
     TriggerSpec,
     parse_reference,
+    validate_sql_identifier,
 )
 
 
 class ContractValidationError(ValueError):
-    """Raised when contract cross-references, columns, or ASTs fail validation."""
+    """Raised when contract cross-references, columns, types, or ASTs fail validation."""
 
 
 # ---------------------------------------------------------------------------
-# Type mapping & SQLGlot AST validation
+# Type mapping, canonical equivalence, & SQLGlot AST validation
 # ---------------------------------------------------------------------------
 
 _PARAMETERIZED_TYPE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
@@ -52,6 +53,7 @@ _SIMPLE_TYPE_MAP: dict[str, str] = {
     "INET": "INET",
     "SERIAL": "SERIAL",
     "BIGSERIAL": "BIGSERIAL",
+    "SMALLSERIAL": "SMALLSERIAL",
     "SMALLINT": "SMALLINT",
     "REAL": "REAL",
     "DOUBLE PRECISION": "DOUBLE PRECISION",
@@ -59,6 +61,28 @@ _SIMPLE_TYPE_MAP: dict[str, str] = {
     "TIME": "TIME",
     "TIMETZ": "TIMETZ",
     "BYTEA": "BYTEA",
+}
+
+_TYPE_ALIASES: dict[str, str] = {
+    "CHARACTER VARYING": "VARCHAR",
+    "TIMESTAMP WITH TIME ZONE": "TIMESTAMPTZ",
+    "TIMESTAMP WITHOUT TIME ZONE": "TIMESTAMP",
+    "TIME WITHOUT TIME ZONE": "TIME",
+    "TIME WITH TIME ZONE": "TIMETZ",
+    "INT4": "INTEGER",
+    "INT": "INTEGER",
+    "SERIAL": "INTEGER",
+    "SERIAL4": "INTEGER",
+    "INT8": "BIGINT",
+    "BIGSERIAL": "BIGINT",
+    "SERIAL8": "BIGINT",
+    "INT2": "SMALLINT",
+    "SMALLSERIAL": "SMALLINT",
+    "SERIAL2": "SMALLINT",
+    "BOOL": "BOOLEAN",
+    "FLOAT4": "REAL",
+    "FLOAT8": "DOUBLE PRECISION",
+    "DECIMAL": "NUMERIC",
 }
 
 
@@ -86,9 +110,76 @@ def resolve_pg_type(yaml_type: str) -> str:
     return resolved
 
 
-def validate_sql_ast(statement: str) -> None:
-    """Parse a SQL DDL statement with SQLGlot Postgres dialect to verify syntax."""
-    sqlglot.parse_one(statement, read="postgres")
+def normalize_pg_type(type_str: str) -> str:
+    """Normalize PostgreSQL type strings for equivalent schema and FK comparison."""
+    cleaned = re.sub(r"\s+", " ", type_str.strip()).upper()
+    cleaned = re.sub(r"\s*,\s*", ",", cleaned)
+    cleaned = re.sub(r"\s*\(\s*", "(", cleaned)
+
+    if "(" in cleaned:
+        base, rest = cleaned.split("(", 1)
+        base = _TYPE_ALIASES.get(base.strip(), base.strip())
+        return f"{base}({rest}"
+    return _TYPE_ALIASES.get(cleaned, cleaned)
+
+
+def types_equivalent(contract_type: str, db_type: str) -> bool:
+    """Return True when two PostgreSQL type strings represent the same storage type."""
+    return normalize_pg_type(contract_type) == normalize_pg_type(db_type)
+
+
+def validate_sql_ast(statement: str) -> exp.Expression:
+    """Parse a single SQL DDL statement with SQLGlot Postgres dialect and reject malformed ASTs."""
+    try:
+        parsed_nodes = sqlglot.parse(statement, read="postgres", error_level=sqlglot.ErrorLevel.RAISE)
+    except Exception as exc:
+        raise ContractValidationError(f"Invalid PostgreSQL DDL AST: {exc}\nSQL: {statement}") from exc
+
+    nodes = [n for n in parsed_nodes if n is not None]
+    if len(nodes) != 1:
+        raise ContractValidationError(
+            f"Expected exactly 1 DDL statement, got {len(nodes)}: {statement}"
+        )
+
+    ast = nodes[0]
+    if isinstance(ast, exp.Block):
+        raise ContractValidationError(
+            f"Unexpected statement Block when expecting single DDL statement: {statement}"
+        )
+    if not isinstance(ast, (exp.Create, exp.Alter, exp.Drop)):
+        raise ContractValidationError(
+            f"Expected DDL statement (Create/Alter/Drop), got {type(ast).__name__}: {statement}"
+        )
+    if isinstance(ast, exp.Drop):
+        if ast.this is None and not ast.args.get("tables"):
+            raise ContractValidationError(f"Invalid PostgreSQL DDL AST (missing DROP target): {statement}")
+    elif ast.this is None:
+        raise ContractValidationError(f"Invalid PostgreSQL DDL AST (missing target): {statement}")
+    if isinstance(ast, exp.Create) and str(ast.args.get("kind", "")).upper() == "TABLE":
+        if isinstance(ast.this, exp.Schema) and not ast.this.expressions:
+            raise ContractValidationError(
+                f"Invalid PostgreSQL DDL AST (empty CREATE TABLE): {statement}"
+            )
+    if isinstance(ast, exp.Alter):
+        actions = ast.args.get("actions") or []
+        if not actions:
+            raise ContractValidationError(
+                f"Invalid PostgreSQL DDL AST (ALTER without actions): {statement}"
+            )
+        for action in actions:
+            if isinstance(action, exp.Command):
+                raise ContractValidationError(
+                    f"Invalid PostgreSQL DDL AST (unparsed ALTER action): {statement}"
+                )
+            if isinstance(action, exp.Drop) and action.this is None and not action.args.get("tables"):
+                raise ContractValidationError(
+                    f"Invalid PostgreSQL DDL AST (missing column/constraint target): {statement}"
+                )
+            if isinstance(action, exp.AlterColumn) and action.this is None:
+                raise ContractValidationError(
+                    f"Invalid PostgreSQL DDL AST (missing column target): {statement}"
+                )
+    return ast
 
 
 # ---------------------------------------------------------------------------
@@ -116,17 +207,35 @@ def load_contracts_from_dir(directory: Path) -> list[DataContractSchema]:
     return sort_contracts_by_dependencies(contracts)
 
 
+def iter_table_foreign_keys(
+    table: TableSpec,
+) -> list[tuple[str, list[str], str, str, str]]:
+    """Return [(fk_name, src_cols, target_ref, on_delete, on_update)] for a table."""
+    items: list[tuple[str, list[str], str, str, str]] = []
+    for col in table.columns:
+        if col.references:
+            items.append(
+                (
+                    col.fk_name or f"fk_{table.name}_{col.name}",
+                    [col.name],
+                    col.references,
+                    col.on_delete or "NO ACTION",
+                    col.on_update or "NO ACTION",
+                )
+            )
+    for fk in table.foreign_keys:
+        items.append(
+            (fk.name, fk.columns, fk.references, fk.on_delete, fk.on_update)
+        )
+    return items
+
+
 def _contract_dependencies(contract: DataContractSchema) -> set[str]:
     """Return external schema names referenced by FKs in this contract."""
     deps: set[str] = set()
     for table in contract.tables:
-        for col in table.columns:
-            if col.references:
-                ref_schema, _, _ = parse_reference(col.references)
-                if ref_schema != contract.schema_name:
-                    deps.add(ref_schema)
-        for fk in table.foreign_keys:
-            ref_schema, _, _ = parse_reference(fk.references)
+        for _, _, target_ref, _, _ in iter_table_foreign_keys(table):
+            ref_schema, _, _ = parse_reference(target_ref)
             if ref_schema != contract.schema_name:
                 deps.add(ref_schema)
     return deps
@@ -168,14 +277,7 @@ def validate_contracts_integrity(
     reference_contracts: Optional[list[DataContractSchema]] = None,
     strict_external: bool = True,
 ) -> None:
-    """Validate internal types, column names, unique keys, and FK referential integrity.
-
-    Args:
-        contracts: Primary contracts being validated.
-        reference_contracts: Optional sibling contracts providing external schema context
-            (for example, Tier 1/2 contracts when validating a Tier 3 contract alone).
-        strict_external: When True, every FK target schema must exist in the combined set.
-    """
+    """Validate types, column names, unique constraint targets, and FK type compatibility."""
     all_contracts = list(contracts)
     if reference_contracts:
         seen_schemas = {c.schema_name for c in all_contracts}
@@ -183,9 +285,8 @@ def validate_contracts_integrity(
             if ref_c.schema_name not in seen_schemas:
                 all_contracts.append(ref_c)
 
-    # Index schemas -> tables -> column sets + key sets
     seen_primary_schemas: set[str] = set()
-    table_columns: dict[tuple[str, str], set[str]] = {}
+    table_columns: dict[tuple[str, str], dict[str, ColumnSpec]] = {}
     table_key_groups: dict[tuple[str, str], set[tuple[str, ...]]] = {}
 
     for contract in contracts:
@@ -204,65 +305,53 @@ def validate_contracts_integrity(
                 )
             seen_tables.add(table.name)
 
-            col_names: set[str] = set()
+            cols_map: dict[str, ColumnSpec] = {}
             key_groups: set[tuple[str, ...]] = set()
             for col in table.columns:
-                if col.name in col_names:
+                if col.name in cols_map:
                     raise ContractValidationError(
                         f"Duplicate column '{col.name}' in '{contract.schema_name}.{table.name}'."
                     )
                 resolve_pg_type(col.type)
-                col_names.add(col.name)
+                cols_map[col.name] = col
                 if col.primary_key:
                     key_groups.add((col.name,))
 
+            # PostgreSQL FKs require PK or UNIQUE constraint (standalone UNIQUE INDEX is rejected)
             for uq in table.unique_constraints:
                 key_groups.add(tuple(uq.columns))
-            for idx in table.indexes:
-                if idx.unique and not idx.where:
-                    key_groups.add(tuple(col for col, _ in idx.parsed_columns()))
 
             key = (contract.schema_name, table.name)
-            table_columns[key] = col_names
+            table_columns[key] = cols_map
             table_key_groups[key] = key_groups
 
-    # Validate constraints & references for primary contracts
     known_schemas = {c.schema_name for c in all_contracts}
     for contract in contracts:
         schema = contract.schema_name
         for table in contract.tables:
-            cols = table_columns[(schema, table.name)]
+            cols_map = table_columns[(schema, table.name)]
             fq_table = f"{schema}.{table.name}"
 
-            # Validate unique constraints & indexes reference local columns
             for uq in table.unique_constraints:
-                missing = [c for c in uq.columns if c not in cols]
+                missing = [c for c in uq.columns if c not in cols_map]
                 if missing:
                     raise ContractValidationError(
                         f"Unique constraint '{uq.name}' on '{fq_table}' references unknown columns: {missing}."
                     )
             for idx in table.indexes:
                 parsed_cols = [c for c, _ in idx.parsed_columns()]
-                missing = [c for c in parsed_cols if c not in cols]
+                missing = [c for c in parsed_cols if c not in cols_map]
                 if missing:
                     raise ContractValidationError(
                         f"Index '{idx.name}' on '{fq_table}' references unknown columns: {missing}."
                     )
 
-            # Collect all FKs (column-level + table-level)
-            fk_checks: list[tuple[str, list[str], str]] = []
-            for col in table.columns:
-                if col.references:
-                    fk_checks.append((f"fk_{table.name}_{col.name}", [col.name], col.references))
-            for fk in table.foreign_keys:
-                missing = [c for c in fk.columns if c not in cols]
-                if missing:
+            for fk_name, src_cols, target_ref, _, _ in iter_table_foreign_keys(table):
+                missing_local = [c for c in src_cols if c not in cols_map]
+                if missing_local:
                     raise ContractValidationError(
-                        f"Foreign key '{fk.name}' on '{fq_table}' references unknown local columns: {missing}."
+                        f"Foreign key '{fk_name}' on '{fq_table}' references unknown local columns: {missing_local}."
                     )
-                fk_checks.append((fk.name, fk.columns, fk.references))
-
-            for fk_name, src_cols, target_ref in fk_checks:
                 ref_schema, ref_table, ref_cols = parse_reference(target_ref)
                 if len(src_cols) != len(ref_cols):
                     raise ContractValidationError(
@@ -280,7 +369,8 @@ def validate_contracts_integrity(
                     raise ContractValidationError(
                         f"Foreign key '{fk_name}' on '{fq_table}' references unknown table '{ref_schema}.{ref_table}'."
                     )
-                missing_target_cols = [c for c in ref_cols if c not in table_columns[target_key]]
+                target_cols_map = table_columns[target_key]
+                missing_target_cols = [c for c in ref_cols if c not in target_cols_map]
                 if missing_target_cols:
                     raise ContractValidationError(
                         f"Foreign key '{fk_name}' on '{fq_table}' references unknown columns "
@@ -289,8 +379,14 @@ def validate_contracts_integrity(
                 if tuple(ref_cols) not in table_key_groups[target_key]:
                     raise ContractValidationError(
                         f"Foreign key '{fk_name}' on '{fq_table}' references non-unique target "
-                        f"'{ref_schema}.{ref_table}({', '.join(ref_cols)})'."
+                        f"'{ref_schema}.{ref_table}({', '.join(ref_cols)})' (must match PK or UNIQUE constraint)."
                     )
+                for src_c, ref_c in zip(src_cols, ref_cols):
+                    if not types_equivalent(cols_map[src_c].type, target_cols_map[ref_c].type):
+                        raise ContractValidationError(
+                            f"Foreign key '{fk_name}' on '{fq_table}' has incompatible types: "
+                            f"{src_c} ({cols_map[src_c].type}) -> {ref_table}.{ref_c} ({target_cols_map[ref_c].type})."
+                        )
 
 
 # ---------------------------------------------------------------------------
@@ -345,7 +441,7 @@ def compile_create_table(table: TableSpec, schema_name: str) -> str:
     return stmt
 
 
-def _compile_fk_constraint(
+def compile_fk_constraint(
     name: str,
     src_cols: list[str],
     references: str,
@@ -354,7 +450,8 @@ def _compile_fk_constraint(
     table_name: str,
     schema_name: str,
 ) -> str:
-    """Shared DDL formatter for both single-column and composite foreign keys."""
+    """Compile and AST-validate an ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY statement."""
+    validate_sql_identifier(name, "Foreign key constraint name")
     ref_schema, ref_table, ref_cols = parse_reference(references)
     src_col_list = ", ".join(f'"{c}"' for c in src_cols)
     ref_col_list = ", ".join(f'"{c}"' for c in ref_cols)
@@ -371,33 +468,18 @@ def _compile_fk_constraint(
 
 def compile_table_foreign_keys(table: TableSpec, schema_name: str) -> list[str]:
     """Compile all column-level and composite FK statements for a table."""
-    stmts: list[str] = []
-    for col in table.columns:
-        if col.references:
-            stmts.append(
-                _compile_fk_constraint(
-                    name=f"fk_{table.name}_{col.name}",
-                    src_cols=[col.name],
-                    references=col.references,
-                    on_delete=col.on_delete or "NO ACTION",
-                    on_update=col.on_update or "NO ACTION",
-                    table_name=table.name,
-                    schema_name=schema_name,
-                )
-            )
-    for fk in table.foreign_keys:
-        stmts.append(
-            _compile_fk_constraint(
-                name=fk.name,
-                src_cols=fk.columns,
-                references=fk.references,
-                on_delete=fk.on_delete,
-                on_update=fk.on_update,
-                table_name=table.name,
-                schema_name=schema_name,
-            )
+    return [
+        compile_fk_constraint(
+            name=fk_name,
+            src_cols=src_cols,
+            references=target_ref,
+            on_delete=on_delete,
+            on_update=on_update,
+            table_name=table.name,
+            schema_name=schema_name,
         )
-    return stmts
+        for fk_name, src_cols, target_ref, on_delete, on_update in iter_table_foreign_keys(table)
+    ]
 
 
 def compile_index(idx: IndexSpec, table_name: str, schema_name: str) -> str:
@@ -426,17 +508,27 @@ def compile_index(idx: IndexSpec, table_name: str, schema_name: str) -> str:
 
 def compile_trigger(trigger: TriggerSpec, table_name: str, schema_name: str) -> list[str]:
     """Compile idempotent PL/pgSQL trigger function + CREATE OR REPLACE TRIGGER."""
+    validate_sql_identifier(trigger.name, "Trigger name")
+    validate_sql_identifier(trigger.function_name, "Trigger function name")
+    if "$$" in trigger.function_body:
+        raise ContractValidationError(
+            f"Trigger function '{trigger.function_name}' body must not contain raw '$$' delimiters."
+        )
+
     fn_name = f'"{schema_name}"."{trigger.function_name}"'
     events = " OR ".join(trigger.events)
-    return [
+    fn_stmt = (
         f"CREATE OR REPLACE FUNCTION {fn_name}()\n"
         f"RETURNS TRIGGER AS $$\n"
         f"{trigger.function_body.rstrip()}\n"
-        f"$$ LANGUAGE plpgsql;",
+        f"$$ LANGUAGE plpgsql;"
+    )
+    trg_stmt = (
         f'CREATE OR REPLACE TRIGGER "{trigger.name}"\n'
         f'{trigger.timing} {events} ON "{schema_name}"."{table_name}"\n'
-        f"FOR EACH {trigger.for_each} EXECUTE FUNCTION {fn_name}();",
-    ]
+        f"FOR EACH {trigger.for_each} EXECUTE FUNCTION {fn_name}();"
+    )
+    return [fn_stmt, trg_stmt]
 
 
 def compile_contract(
@@ -444,28 +536,12 @@ def compile_contract(
     validate_integrity: bool = False,
 ) -> list[str]:
     """Compile a single data contract into ordered PostgreSQL DDL statements."""
-    if validate_integrity:
-        validate_contracts_integrity([contract], strict_external=False)
+    return compile_contracts([contract], validate_integrity=False) if not validate_integrity else _compile_single_validated(contract)
 
-    schema = contract.schema_name
-    stmts: list[str] = [f'CREATE SCHEMA IF NOT EXISTS "{schema}";']
-    validate_sql_ast(stmts[0])
 
-    for table in contract.tables:
-        stmts.append(compile_create_table(table, schema))
-
-    for table in contract.tables:
-        stmts.extend(compile_table_foreign_keys(table, schema))
-
-    for table in contract.tables:
-        for idx in table.indexes:
-            stmts.append(compile_index(idx, table.name, schema))
-
-    for table in contract.tables:
-        for trigger in table.triggers:
-            stmts.extend(compile_trigger(trigger, table.name, schema))
-
-    return stmts
+def _compile_single_validated(contract: DataContractSchema) -> list[str]:
+    validate_contracts_integrity([contract], strict_external=False)
+    return compile_contracts([contract], validate_integrity=False)
 
 
 def compile_contracts(

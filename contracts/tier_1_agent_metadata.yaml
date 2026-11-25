@@ -35,6 +35,7 @@ tables:
         nullable: true
         default: "NULL"
         references: "agent_metadata.agent_run_header(run_id)"
+        fk_name: "fk_run_parent"
         on_delete: "SET NULL"
         description: "Parent run ID for sub-agent or child workflow orchestrations."
       - name: "agent_id"
@@ -147,6 +148,7 @@ tables:
         type: "UUID"
         nullable: false
         references: "agent_metadata.agent_run_header(run_id)"
+        fk_name: "fk_exec_run"
         on_delete: "CASCADE"
         description: "Execution run reference."
       - name: "parent_log_id"
@@ -311,6 +313,7 @@ tables:
         nullable: true
         default: "NULL"
         references: "agent_metadata.agent_run_header(run_id)"
+        fk_name: "fk_artifact_run"
         on_delete: "RESTRICT"
         description: "Run that generated this artifact. Nullable for external/pre-existing seed inputs."
       - name: "produced_log_id"
@@ -392,12 +395,14 @@ tables:
         type: "UUID"
         nullable: false
         references: "agent_metadata.agent_run_header(run_id)"
+        fk_name: "fk_manifest_run"
         on_delete: "CASCADE"
         description: "Execution run reference."
       - name: "artifact_id"
         type: "UUID"
         nullable: false
         references: "agent_metadata.artifact_registry(artifact_id)"
+        fk_name: "fk_manifest_artifact"
         on_delete: "RESTRICT"
         description: "Referenced asset from the catalog."
       - name: "associated_log_id"
@@ -455,6 +460,7 @@ tables:
         nullable: true
         default: "NULL"
         references: "agent_metadata.agent_run_header(run_id)"
+        fk_name: "fk_audit_run"
         on_delete: "RESTRICT"
         description: "Associated run ID (nullable for system-level administrative actions)."
       - name: "correlation_id"
@@ -564,6 +570,7 @@ tables:
         type: "UUID"
         nullable: false
         references: "agent_metadata.agent_run_header(run_id)"
+        fk_name: "fk_decision_run"
         on_delete: "CASCADE"
         description: "Execution run reference."
       - name: "log_id"

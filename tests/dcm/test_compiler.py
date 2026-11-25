@@ -12,6 +12,7 @@ from src.dcm.compiler import (
     resolve_pg_type,
     sort_contracts_by_dependencies,
     validate_contracts_integrity,
+    validate_sql_ast,
 )
 from src.dcm.models import (
     ColumnSpec,
@@ -32,6 +33,8 @@ class TestResolveType:
         assert resolve_pg_type("TEXT") == "TEXT"
         assert resolve_pg_type("INTEGER") == "INTEGER"
         assert resolve_pg_type("BIGINT") == "BIGINT"
+        assert resolve_pg_type("SERIAL") == "SERIAL"
+        assert resolve_pg_type("BIGSERIAL") == "BIGSERIAL"
         assert resolve_pg_type("TIMESTAMPTZ") == "TIMESTAMPTZ"
         assert resolve_pg_type("JSONB") == "JSONB"
         assert resolve_pg_type("INET") == "INET"
@@ -56,6 +59,20 @@ class TestResolveType:
     def test_unknown_type_raises(self):
         with pytest.raises(ValueError, match="Unrecognized column type"):
             resolve_pg_type("FAKETYPE")
+
+
+class TestValidateSqlAst:
+    def test_rejects_multi_statement_block(self):
+        with pytest.raises(ContractValidationError, match="Expected exactly 1 DDL statement"):
+            validate_sql_ast('CREATE TABLE "s"."t" ("a" INT); DROP TABLE users;')
+
+    def test_rejects_malformed_ddl(self):
+        with pytest.raises(ContractValidationError, match="Invalid PostgreSQL DDL AST"):
+            validate_sql_ast("ALTER TABLE s.t DROP COLUMN ;")
+        with pytest.raises(ContractValidationError, match="Invalid PostgreSQL DDL AST"):
+            validate_sql_ast("CREATE TABLE s.t ();")
+        with pytest.raises(ContractValidationError, match="DDL statement"):
+            validate_sql_ast("SELECT 1;")
 
 
 class TestParseReference:
@@ -109,18 +126,12 @@ class TestModels:
                 ],
             )
 
-    def test_invalid_schema_name_raises(self):
+    @pytest.mark.parametrize("bad_ident", ['bad"name', "bad;drop", "1starts_num", "has space"])
+    def test_invalid_sql_identifiers_rejected(self, bad_ident: str):
         with pytest.raises(ValueError, match="not a valid SQL identifier"):
-            DataContractSchema(
-                version="1.0",
-                schema_name="invalid-schema-name",
-                tables=[
-                    TableSpec(
-                        name="t",
-                        columns=[ColumnSpec(name="id", type="UUID")],
-                    )
-                ],
-            )
+            ColumnSpec(name=bad_ident, type="UUID")
+        with pytest.raises(ValueError, match="not a valid SQL identifier"):
+            TableSpec(name=bad_ident, columns=[ColumnSpec(name="id", type="UUID")])
 
 
 class TestCompileAndIntegrity:
@@ -239,7 +250,7 @@ class TestCompileAndIntegrity:
         with pytest.raises(ContractValidationError, match="unknown table"):
             validate_contracts_integrity([bad])
 
-    def test_non_unique_fk_target_fails_integrity(self):
+    def test_fk_to_standalone_unique_index_rejected(self):
         bad = DataContractSchema(
             version="1.0",
             schema_name="broken",
@@ -248,26 +259,80 @@ class TestCompileAndIntegrity:
                     name="parent",
                     columns=[
                         ColumnSpec(name="id", type="UUID", primary_key=True, nullable=False),
-                        ColumnSpec(name="non_unique_col", type="UUID", nullable=False),
+                        ColumnSpec(name="code", type="VARCHAR(50)", nullable=False),
                     ],
+                    indexes=[IndexSpec(name="idx_parent_code_uq", columns=["code"], unique=True)],
                 ),
                 TableSpec(
                     name="child",
                     columns=[
                         ColumnSpec(name="id", type="UUID", primary_key=True, nullable=False),
                         ColumnSpec(
-                            name="ref_col",
-                            type="UUID",
-                            references="broken.parent(non_unique_col)",
+                            name="code",
+                            type="VARCHAR(50)",
+                            references="broken.parent(code)",
                         ),
                     ],
                 ),
             ],
         )
-        with pytest.raises(ContractValidationError, match="non-unique target"):
+        with pytest.raises(ContractValidationError, match="must match PK or UNIQUE constraint"):
             validate_contracts_integrity([bad])
 
-    def test_topological_sort_orders_parent_schema_first(self):
+    def test_fk_arity_and_type_mismatch_rejected(self):
+        arity_bad = DataContractSchema(
+            version="1.0",
+            schema_name="broken",
+            tables=[
+                TableSpec(
+                    name="p",
+                    columns=[
+                        ColumnSpec(name="a", type="UUID", primary_key=True, nullable=False),
+                        ColumnSpec(name="b", type="UUID", nullable=False),
+                    ],
+                    unique_constraints=[UniqueConstraintSpec(name="uq_ab", columns=["a", "b"])],
+                ),
+                TableSpec(
+                    name="c",
+                    columns=[ColumnSpec(name="id", type="UUID", primary_key=True, nullable=False)],
+                    foreign_keys=[
+                        ForeignKeySpec(
+                            name="fk_bad_arity",
+                            columns=["id"],
+                            references="broken.p(a, b)",
+                        )
+                    ],
+                ),
+            ],
+        )
+        with pytest.raises(ContractValidationError, match="column count mismatch"):
+            validate_contracts_integrity([arity_bad])
+
+        type_bad = DataContractSchema(
+            version="1.0",
+            schema_name="broken",
+            tables=[
+                TableSpec(
+                    name="p",
+                    columns=[ColumnSpec(name="id", type="UUID", primary_key=True, nullable=False)],
+                ),
+                TableSpec(
+                    name="c",
+                    columns=[
+                        ColumnSpec(name="id", type="UUID", primary_key=True, nullable=False),
+                        ColumnSpec(
+                            name="p_id",
+                            type="VARCHAR(50)",
+                            references="broken.p(id)",
+                        ),
+                    ],
+                ),
+            ],
+        )
+        with pytest.raises(ContractValidationError, match="incompatible types"):
+            validate_contracts_integrity([type_bad])
+
+    def test_topological_sort_orders_parent_schema_first_and_detects_cycles(self):
         child = DataContractSchema(
             version="1.0",
             schema_name="aaa_child",
@@ -294,7 +359,13 @@ class TestCompileAndIntegrity:
         ordered = sort_contracts_by_dependencies([child, parent])
         assert [c.schema_name for c in ordered] == ["zzz_parent", "aaa_child"]
 
-    def test_composite_foreign_key(self):
+        parent.tables[0].columns.append(
+            ColumnSpec(name="c_id", type="UUID", references="aaa_child.c(id)")
+        )
+        with pytest.raises(ContractValidationError, match="Circular cross-schema FK"):
+            sort_contracts_by_dependencies([child, parent])
+
+    def test_explicit_fk_name_and_referential_actions(self):
         contract = DataContractSchema(
             version="1.0",
             schema_name="myschema",
@@ -313,13 +384,20 @@ class TestCompileAndIntegrity:
                     name="child",
                     columns=[
                         ColumnSpec(name="id", type="UUID", primary_key=True, nullable=False),
-                        ColumnSpec(name="ref_a", type="UUID", nullable=True),
+                        ColumnSpec(
+                            name="p_id",
+                            type="UUID",
+                            references="myschema.parent(a)",
+                            fk_name="fk_custom_p",
+                            on_delete="RESTRICT",
+                            on_update="CASCADE",
+                        ),
                         ColumnSpec(name="ref_b", type="UUID", nullable=True),
                     ],
                     foreign_keys=[
                         ForeignKeySpec(
                             name="fk_child_parent",
-                            columns=["ref_a", "ref_b"],
+                            columns=["p_id", "ref_b"],
                             references="myschema.parent(a, b)",
                             on_delete="SET NULL",
                         ),
@@ -328,11 +406,14 @@ class TestCompileAndIntegrity:
             ],
         )
         stmts = compile_contract(contract, validate_integrity=True)
-        fk_stmts = [s for s in stmts if "fk_child_parent" in s]
-        assert len(fk_stmts) == 1
-        assert 'FOREIGN KEY ("ref_a", "ref_b")' in fk_stmts[0]
+        fk_stmts = [s for s in stmts if "FOREIGN KEY" in s]
+        assert any(
+            'CONSTRAINT "fk_custom_p"' in s and "ON DELETE RESTRICT ON UPDATE CASCADE" in s
+            for s in fk_stmts
+        )
+        assert any('CONSTRAINT "fk_child_parent"' in s and "ON DELETE SET NULL" in s for s in fk_stmts)
 
-    def test_trigger_compilation_idempotent(self):
+    def test_trigger_compilation_idempotent_and_rejects_raw_dollar_delimiters(self):
         contract = DataContractSchema(
             version="1.0",
             schema_name="myschema",
@@ -358,6 +439,10 @@ class TestCompileAndIntegrity:
         stmts = compile_contract(contract)
         assert any("CREATE OR REPLACE FUNCTION" in s for s in stmts)
         assert any("CREATE OR REPLACE TRIGGER" in s and "trg_immutable" in s for s in stmts)
+
+        contract.tables[0].triggers[0].function_body = "BEGIN RAISE EXCEPTION $$oops$$; END;"
+        with pytest.raises(ContractValidationError, match=r"\$\$"):
+            compile_contract(contract)
 
 
 class TestLoadRealContracts:
@@ -387,22 +472,33 @@ class TestLoadRealContracts:
         stmts = compile_contracts(contracts, validate_integrity=True)
         assert len(stmts) > 40
 
-    def test_tier1_has_immutability_trigger_and_desc_indexes(self, contracts_dir):
+    def test_tier1_has_explicit_fk_names_immutability_and_desc_indexes(self, contracts_dir):
         contract = load_contract(contracts_dir / "tier_1_agent_metadata.yaml")
         stmts = compile_contract(contract)
-        assert any("trg_audit_log_immutable" in s for s in stmts)
-        assert any('"actor_id", "occurred_at" DESC' in s for s in stmts)
+        sql = "\n".join(stmts)
+        for fk in [
+            "fk_run_parent",
+            "fk_exec_run",
+            "fk_exec_parent",
+            "fk_exec_retry",
+            "fk_artifact_run",
+            "fk_artifact_step",
+            "fk_manifest_run",
+            "fk_manifest_artifact",
+            "fk_manifest_step",
+            "fk_audit_run",
+            "fk_decision_run",
+            "fk_decision_step",
+        ]:
+            assert f'"{fk}"' in sql
+        assert "trg_audit_log_immutable" in sql
+        assert '"actor_id", "occurred_at" DESC' in sql
 
-    def test_tier1_has_composite_fks(self, contracts_dir):
-        contract = load_contract(contracts_dir / "tier_1_agent_metadata.yaml")
-        stmts = compile_contract(contract)
-        composite_fks = [s for s in stmts if "fk_exec_parent" in s or "fk_exec_retry" in s]
-        assert len(composite_fks) == 2
-
-    def test_tier2_has_vector_column_and_hnsw_index(self, contracts_dir):
+    def test_tier2_has_decision26_stages_vector_column_and_hnsw_index(self, contracts_dir):
         contract = load_contract(contracts_dir / "tier_2_ddlc_shared_metadata.yaml")
         stmts = compile_contract(contract)
-        comp_table = [s for s in stmts if "component_registry" in s and "CREATE TABLE" in s]
-        assert len(comp_table) == 1
-        assert "vector(1536)" in comp_table[0]
-        assert any("USING hnsw" in s and "vector_cosine_ops" in s for s in stmts)
+        sql = "\n".join(stmts)
+        assert "vector(1536)" in sql
+        assert "USING hnsw" in sql and "vector_cosine_ops" in sql
+        assert "'code_generation'" in sql
+        assert "'sandbox_testing'" in sql

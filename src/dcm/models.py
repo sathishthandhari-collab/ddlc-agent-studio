@@ -6,9 +6,22 @@ The DCM compiler ingests validated contracts and emits deterministic PostgreSQL 
 
 from __future__ import annotations
 
+import re
 from typing import Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
+
+_SQL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def validate_sql_identifier(value: str, label: str = "Identifier") -> str:
+    """Validate that a SQL identifier contains only safe unquoted characters."""
+    if not _SQL_IDENTIFIER_RE.match(value):
+        raise ValueError(
+            f"{label} '{value}' is not a valid SQL identifier "
+            "(expected ^[A-Za-z_][A-Za-z0-9_]*$)."
+        )
+    return value
 
 
 def parse_reference(ref: str) -> tuple[str, str, list[str]]:
@@ -31,8 +44,13 @@ def parse_reference(ref: str) -> tuple[str, str, list[str]]:
         raise ValueError(
             f"Reference '{ref}' must be in 'schema.table(col)' format."
         )
-    schema, table = parts[0].strip(), parts[1].strip()
-    cols = [c.strip() for c in cols_str.split(",") if c.strip()]
+    schema = validate_sql_identifier(parts[0].strip(), "Referenced schema")
+    table = validate_sql_identifier(parts[1].strip(), "Referenced table")
+    cols = [
+        validate_sql_identifier(c.strip(), "Referenced column")
+        for c in cols_str.split(",")
+        if c.strip()
+    ]
     if not cols:
         raise ValueError(f"Reference '{ref}' must name at least one column.")
     return schema, table, cols
@@ -43,10 +61,11 @@ def parse_index_column(spec: str, default_desc: bool = False) -> tuple[str, Opti
     tokens = spec.strip().split()
     if not tokens:
         raise ValueError("Index column entry cannot be empty.")
+    col_name = validate_sql_identifier(tokens[0], "Index column")
     if len(tokens) == 2 and tokens[1].upper() in {"ASC", "DESC"}:
-        return tokens[0], tokens[1].upper()
+        return col_name, tokens[1].upper()
     if len(tokens) == 1:
-        return tokens[0], "DESC" if default_desc else None
+        return col_name, "DESC" if default_desc else None
     raise ValueError(
         f"Invalid index column specification '{spec}'. Expected 'col' or 'col ASC|DESC'."
     )
@@ -70,6 +89,16 @@ class TriggerSpec(BaseModel):
         ..., description="PL/pgSQL function body (BEGIN...END block)."
     )
 
+    @field_validator("name")
+    @classmethod
+    def _check_name(cls, v: str) -> str:
+        return validate_sql_identifier(v, "Trigger name")
+
+    @field_validator("function_name")
+    @classmethod
+    def _check_fn_name(cls, v: str) -> str:
+        return validate_sql_identifier(v, "Trigger function name")
+
 
 class IndexSpec(BaseModel):
     """Table index specification."""
@@ -91,6 +120,18 @@ class IndexSpec(BaseModel):
     where: Optional[str] = Field(
         None, description="Partial index WHERE predicate."
     )
+
+    @field_validator("name")
+    @classmethod
+    def _check_name(cls, v: str) -> str:
+        return validate_sql_identifier(v, "Index name")
+
+    @field_validator("opclass")
+    @classmethod
+    def _check_opclass(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None:
+            return validate_sql_identifier(v, "Index opclass")
+        return v
 
     def parsed_columns(self) -> list[tuple[str, Optional[str]]]:
         """Return [(column_name, 'ASC'|'DESC'|None), ...] for each column entry."""
@@ -115,6 +156,16 @@ class ForeignKeySpec(BaseModel):
         "NO ACTION", description="Referential action on update."
     )
 
+    @field_validator("name")
+    @classmethod
+    def _check_name(cls, v: str) -> str:
+        return validate_sql_identifier(v, "Foreign key constraint name")
+
+    @field_validator("columns")
+    @classmethod
+    def _check_columns(cls, cols: list[str]) -> list[str]:
+        return [validate_sql_identifier(c, "Foreign key column") for c in cols]
+
     @field_validator("references")
     @classmethod
     def validate_reference_format(cls, v: str) -> str:
@@ -128,6 +179,11 @@ class CheckConstraintSpec(BaseModel):
     name: str = Field(..., description="Constraint name.")
     expression: str = Field(..., description="SQL CHECK expression.")
 
+    @field_validator("name")
+    @classmethod
+    def _check_name(cls, v: str) -> str:
+        return validate_sql_identifier(v, "Check constraint name")
+
 
 class UniqueConstraintSpec(BaseModel):
     """Named UNIQUE constraint specification."""
@@ -136,6 +192,16 @@ class UniqueConstraintSpec(BaseModel):
     columns: list[str] = Field(
         ..., min_length=1, description="Columns forming the unique group."
     )
+
+    @field_validator("name")
+    @classmethod
+    def _check_name(cls, v: str) -> str:
+        return validate_sql_identifier(v, "Unique constraint name")
+
+    @field_validator("columns")
+    @classmethod
+    def _check_columns(cls, cols: list[str]) -> list[str]:
+        return [validate_sql_identifier(c, "Unique constraint column") for c in cols]
 
 
 class ColumnSpec(BaseModel):
@@ -155,12 +221,28 @@ class ColumnSpec(BaseModel):
         None,
         description="Single-column FK in 'schema.table(column)' format.",
     )
+    fk_name: Optional[str] = Field(
+        None,
+        description="Optional explicit foreign key constraint name for single-column FK.",
+    )
     on_delete: Optional[
         Literal["CASCADE", "SET NULL", "RESTRICT", "NO ACTION", "SET DEFAULT"]
     ] = Field(None, description="Referential action on delete for simple FK.")
     on_update: Optional[
         Literal["CASCADE", "SET NULL", "RESTRICT", "NO ACTION", "SET DEFAULT"]
     ] = Field(None, description="Referential action on update for simple FK.")
+
+    @field_validator("name")
+    @classmethod
+    def _check_name(cls, v: str) -> str:
+        return validate_sql_identifier(v, "Column name")
+
+    @field_validator("fk_name")
+    @classmethod
+    def _check_fk_name(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None:
+            return validate_sql_identifier(v, "Foreign key constraint name")
+        return v
 
     @field_validator("references")
     @classmethod
@@ -192,6 +274,11 @@ class TableSpec(BaseModel):
     triggers: list[TriggerSpec] = Field(
         default_factory=list, description="Database triggers."
     )
+
+    @field_validator("name")
+    @classmethod
+    def _check_name(cls, v: str) -> str:
+        return validate_sql_identifier(v, "Table name")
 
     @field_validator("columns")
     @classmethod
@@ -227,8 +314,4 @@ class DataContractSchema(BaseModel):
     @field_validator("schema_name")
     @classmethod
     def validate_schema_name(cls, v: str) -> str:
-        if not v.isidentifier():
-            raise ValueError(
-                f"Schema name '{v}' is not a valid SQL identifier."
-            )
-        return v
+        return validate_sql_identifier(v, "Schema name")

@@ -9,13 +9,13 @@ import typer
 from rich.console import Console
 from rich.syntax import Syntax
 
-from src.dcm.compiler import (
+from .compiler import (
     compile_contracts,
     load_contract,
     load_contracts_from_dir,
     validate_contracts_integrity,
 )
-from src.dcm.migrator import (
+from .migrator import (
     DestructiveMigrationError,
     apply_migrations,
     compute_migration_plan,
@@ -25,7 +25,7 @@ from src.dcm.migrator import (
     get_migration_status,
     introspect_database,
 )
-from src.dcm.models import DataContractSchema
+from .models import DataContractSchema
 
 app = typer.Typer(
     name="dcm",
@@ -90,7 +90,6 @@ def validate(
             reference_contracts=refs or None,
             strict_external=True if (target.is_dir() or refs) else False,
         )
-        # Dry-run DDL compilation verifies SQLGlot AST parsing for all statements
         compile_contracts(contracts)
     except Exception as exc:
         console.print(f"[red]  x Validation failed: {exc}[/red]")
@@ -161,7 +160,8 @@ def plan(
             continue
         console.print(f"[blue][INFO] Schema: {schema_name}[/blue]")
         for op in schema_ops:
-            color = "red" if op.kind.startswith("drop") or "alter_column_type" in op.kind else "green"
+            is_destructive = op.kind.startswith("drop") or op.kind == "alter_column_type"
+            color = "red" if is_destructive else "green"
             console.print(f"  [{color}]{op.description}[/{color}]")
 
     report = migration_plan.safety_report()
@@ -294,7 +294,7 @@ def status(
     try:
         info = get_migration_status(db_uri, contracts=contracts)
     except Exception as exc:
-        console.print(f"\n[yellow]Could not retrieve status: {exc}[/yellow]")
+        console.print(f"\n[red]Could not retrieve status: {exc}[/red]")
         raise typer.Exit(code=1)
 
     head_label = " (head)" if info["is_up_to_date"] and info["current_revision"] else ""
@@ -307,9 +307,13 @@ def status(
         for schema_name, synced in info["schemas"].items():
             state = "[green]synced[/green]" if synced else "[yellow]drift / pending[/yellow]"
             console.print(f"    - {schema_name} ({state})")
+    else:
+        console.print("  [yellow]No contracts found for schema drift inspection.[/yellow]")
 
-    if info["is_up_to_date"] and all(info["schemas"].values()):
+    if info["is_up_to_date"] and info["schemas"] and all(info["schemas"].values()):
         console.print("\n[green]Database is up to date.[/green]")
+    elif info["is_up_to_date"] and not info["pending_migrations"] and not info["schemas"]:
+        console.print("\n[green]Revision matches head.[/green]")
     else:
         console.print("\n[yellow]Pending migrations or schema drift detected.[/yellow]")
 

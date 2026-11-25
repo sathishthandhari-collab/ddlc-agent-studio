@@ -1,4 +1,4 @@
-"""DCM Migrator — PostgreSQL catalog introspection, schema diffing, and Alembic execution."""
+"""DCM Migrator — PostgreSQL catalog introspection, deep schema diffing, and Alembic execution."""
 
 from __future__ import annotations
 
@@ -9,24 +9,28 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, TextIO
 
+import psycopg
 from alembic import command
 from alembic.config import Config as AlembicConfig
 from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
 
-from src.dcm.compiler import (
+from .compiler import (
     compile_column_definition,
     compile_create_table,
+    compile_fk_constraint,
     compile_index,
-    compile_table_foreign_keys,
     compile_trigger,
+    iter_table_foreign_keys,
     resolve_pg_type,
     sort_contracts_by_dependencies,
+    types_equivalent,
     validate_sql_ast,
 )
-from src.dcm.models import DataContractSchema, parse_reference
-from src.dcm.safety import SafetyReport, analyze_migration, gate_check
+from .models import DataContractSchema, IndexSpec, TableSpec, parse_reference
+from .safety import SafetyReport, analyze_migration, gate_check
 
 
 class DestructiveMigrationError(RuntimeError):
@@ -41,7 +45,7 @@ class DestructiveMigrationError(RuntimeError):
 
 
 def to_sqlalchemy_uri(db_uri: str) -> str:
-    """Normalize postgresql:// URIs to postgresql+psycopg:// for psycopg v3."""
+    """Normalize postgres:// and postgresql:// URIs to postgresql+psycopg://."""
     if db_uri.startswith("postgres://"):
         return db_uri.replace("postgres://", "postgresql+psycopg://", 1)
     if db_uri.startswith("postgresql://"):
@@ -50,7 +54,7 @@ def to_sqlalchemy_uri(db_uri: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Catalog Snapshot Data Structures & Type Normalization
+# Catalog Snapshot & PostgreSQL Normalization
 # ---------------------------------------------------------------------------
 
 
@@ -65,16 +69,29 @@ class IntrospectedColumn:
 
 
 @dataclass
+class IntrospectedTrigger:
+    """Live trigger metadata introspected from PostgreSQL."""
+
+    name: str
+    timing: str
+    events: tuple[str, ...]
+    for_each: str
+    function_schema: str
+    function_name: str
+    function_body: str
+
+
+@dataclass
 class IntrospectedTable:
     """Live table structure introspected from PostgreSQL."""
 
     schema_name: str
     name: str
     columns: dict[str, IntrospectedColumn] = field(default_factory=dict)
-    constraints: set[str] = field(default_factory=set)
-    indexes: set[str] = field(default_factory=set)
+    constraints: dict[str, tuple[str, str]] = field(default_factory=dict)  # name -> (contype, def)
+    indexes: dict[str, str] = field(default_factory=dict)  # name -> indexdef
     constraint_indexes: set[str] = field(default_factory=set)
-    triggers: set[str] = field(default_factory=set)
+    triggers: dict[str, IntrospectedTrigger] = field(default_factory=dict)
 
 
 @dataclass
@@ -85,39 +102,207 @@ class CatalogSnapshot:
     tables: dict[tuple[str, str], IntrospectedTable] = field(default_factory=dict)
 
 
-_TYPE_ALIASES: dict[str, str] = {
-    "CHARACTER VARYING": "VARCHAR",
-    "TIMESTAMP WITH TIME ZONE": "TIMESTAMPTZ",
-    "TIMESTAMP WITHOUT TIME ZONE": "TIMESTAMP",
-    "TIME WITHOUT TIME ZONE": "TIME",
-    "TIME WITH TIME ZONE": "TIMETZ",
-    "INT4": "INTEGER",
-    "INT": "INTEGER",
-    "INT8": "BIGINT",
-    "INT2": "SMALLINT",
-    "BOOL": "BOOLEAN",
-    "FLOAT4": "REAL",
-    "FLOAT8": "DOUBLE PRECISION",
-    "DECIMAL": "NUMERIC",
-}
+_PG_CAST_RE = re.compile(
+    r"::(?:character varying|varchar(?:\(\d+\))?|text|numeric(?:\(\d+,\d+\))?|"
+    r"integer|int4|bigint|int8|smallint|int2|jsonb|json|uuid|boolean|bool|"
+    r"double precision|real|inet|vector(?:\(\d+\))?|"
+    r"timestamp with time zone|timestamp without time zone|"
+    r"timestamptz|timestamp)(?:\[\])?",
+    re.IGNORECASE,
+)
 
 
-def normalize_pg_type(type_str: str) -> str:
-    """Normalize PostgreSQL type strings for equivalent schema comparison."""
-    cleaned = re.sub(r"\s+", " ", type_str.strip()).upper()
-    cleaned = re.sub(r"\s*,\s*", ",", cleaned)
-    cleaned = re.sub(r"\s*\(\s*", "(", cleaned)
+def normalize_default_expr(expr: Optional[str]) -> Optional[str]:
+    """Normalize SQL DEFAULT expression for drift comparison."""
+    if expr is None:
+        return None
+    stripped = expr.strip()
+    if re.match(r"^NULL(?:::.+)?$", stripped, re.IGNORECASE):
+        return None
+    stripped = _PG_CAST_RE.sub("", stripped)
+    stripped = re.sub(r"\s+", " ", stripped).strip()
+    if stripped.upper() in {"NULL", ""}:
+        return None
+    return stripped
 
-    if "(" in cleaned:
-        base, rest = cleaned.split("(", 1)
-        base = _TYPE_ALIASES.get(base.strip(), base.strip())
-        return f"{base}({rest}"
-    return _TYPE_ALIASES.get(cleaned, cleaned)
+
+def _strip_outer_parens(expr: str) -> str:
+    s = expr.strip()
+    while s.startswith("(") and s.endswith(")"):
+        depth = 0
+        wrapped = True
+        for idx, ch in enumerate(s):
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0 and idx < len(s) - 1:
+                    wrapped = False
+                    break
+        if not wrapped or depth != 0:
+            break
+        s = s[1:-1].strip()
+    return s
 
 
-def types_equivalent(contract_type: str, db_type: str) -> bool:
-    """Return True when a contract type and live PG type represent the same type."""
-    return normalize_pg_type(contract_type) == normalize_pg_type(db_type)
+def normalize_check_expr(expr: str) -> str:
+    """Normalize CHECK constraint expressions across PostgreSQL rewrite forms."""
+    s = expr.strip()
+    if s.upper().startswith("CHECK"):
+        s = s[5:].strip()
+    s = _strip_outer_parens(s)
+    s = _PG_CAST_RE.sub("", s)
+    s = s.replace("<>", "!=")
+    s = re.sub(
+        r"\(?\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*ANY\s*\(\s*ARRAY\[([^\]]+)\]\s*\)\s*\)?",
+        r"\1 IN (\2)",
+        s,
+        flags=re.IGNORECASE,
+    )
+    s = re.sub(
+        r"\(?\s*([A-Za-z_][A-Za-z0-9_]*)\s*!=\s*ALL\s*\(\s*ARRAY\[([^\]]+)\]\s*\)\s*\)?",
+        r"\1 NOT IN (\2)",
+        s,
+        flags=re.IGNORECASE,
+    )
+    s = re.sub(
+        r"([A-Za-z_][A-Za-z0-9_]*)\s+BETWEEN\s+([^\s)]+)\s+AND\s+([^\s)]+)",
+        r"(\1 >= \2 AND \1 <= \3)",
+        s,
+        flags=re.IGNORECASE,
+    )
+    # Remove parens and spaces uniformly so PG parenthesization matches YAML input
+    s = s.replace("(", " ").replace(")", " ")
+    s = re.sub(r"\s*,\s*", ",", s)
+    s = re.sub(r"\s+", " ", s).strip().lower()
+    return s
+
+
+def _normalize_unique_cols(condef: str) -> tuple[str, ...]:
+    m = re.match(r"^\s*UNIQUE\s*\(([^)]+)\)", condef, re.IGNORECASE)
+    if not m:
+        return ()
+    return tuple(c.strip().strip('"') for c in m.group(1).split(","))
+
+
+def _normalize_fk_def(
+    condef: str, default_schema: str
+) -> Optional[tuple[tuple[str, ...], str, str, tuple[str, ...], str, str]]:
+    """Parse PostgreSQL pg_get_constraintdef FOREIGN KEY into comparable tuple."""
+    m = re.match(
+        r"^\s*FOREIGN\s+KEY\s*\(([^)]+)\)\s+REFERENCES\s+([^(]+)\(([^)]+)\)(.*)$",
+        condef.strip(),
+        re.IGNORECASE,
+    )
+    if not m:
+        return None
+    src_cols = tuple(c.strip().strip('"') for c in m.group(1).split(","))
+    target_tbl = m.group(2).strip().replace('"', "")
+    if "." in target_tbl:
+        ref_schema, ref_table = target_tbl.split(".", 1)
+    else:
+        ref_schema, ref_table = default_schema, target_tbl
+    ref_cols = tuple(c.strip().strip('"') for c in m.group(3).split(","))
+    tail = m.group(4)
+    on_del_m = re.search(
+        r"ON\s+DELETE\s+(CASCADE|SET NULL|RESTRICT|NO ACTION|SET DEFAULT)",
+        tail,
+        re.IGNORECASE,
+    )
+    on_upd_m = re.search(
+        r"ON\s+UPDATE\s+(CASCADE|SET NULL|RESTRICT|NO ACTION|SET DEFAULT)",
+        tail,
+        re.IGNORECASE,
+    )
+    on_delete = on_del_m.group(1).upper() if on_del_m else "NO ACTION"
+    on_update = on_upd_m.group(1).upper() if on_upd_m else "NO ACTION"
+    return (src_cols, ref_schema, ref_table, ref_cols, on_delete, on_update)
+
+
+def _normalize_where_clause(where: Optional[str]) -> str:
+    if not where:
+        return ""
+    s = _PG_CAST_RE.sub("", where.strip())
+    s = s.replace("(", " ").replace(")", " ")
+    return re.sub(r"\s+", " ", s).strip().lower()
+
+
+def _parse_pg_indexdef(
+    indexdef: str,
+) -> tuple[bool, str, tuple[tuple[str, Optional[str], str], ...], str]:
+    """Parse PostgreSQL pg_indexes.indexdef into (unique, method, cols, where_norm)."""
+    m = re.match(
+        r"^\s*CREATE\s+(UNIQUE\s+)?INDEX\s+\S+\s+ON\s+\S+\s+USING\s+(\w+)\s+\((.+?)\)(?:\s+WHERE\s+(.+))?$",
+        indexdef.strip(),
+        re.IGNORECASE,
+    )
+    if not m:
+        return (False, "btree", (), "")
+    is_unique = bool(m.group(1))
+    method = m.group(2).lower()
+    raw_cols = m.group(3)
+    where_norm = _normalize_where_clause(m.group(4))
+
+    cols: list[tuple[str, Optional[str], str]] = []
+    for entry in raw_cols.split(","):
+        tokens = entry.strip().replace('"', "").split()
+        if not tokens:
+            continue
+        col_name = tokens[0]
+        direction = "ASC"
+        opclass: Optional[str] = None
+        for tok in tokens[1:]:
+            up = tok.upper()
+            if up in {"ASC", "DESC"}:
+                direction = up
+            elif up not in {"NULLS", "FIRST", "LAST"}:
+                opclass = tok.lower()
+        cols.append((col_name, opclass, direction))
+    return (is_unique, method, tuple(cols), where_norm)
+
+
+def _expected_index_signature(
+    idx: IndexSpec,
+) -> tuple[bool, str, tuple[tuple[str, Optional[str], str], ...], str]:
+    cols = tuple(
+        (
+            col_name,
+            idx.opclass.lower() if idx.opclass else None,
+            direction or "ASC",
+        )
+        for col_name, direction in idx.parsed_columns()
+    )
+    return (
+        idx.unique,
+        (idx.method or "btree").lower(),
+        cols,
+        _normalize_where_clause(idx.where),
+    )
+
+
+def _decode_trigger_events(tgtype: int) -> tuple[str, tuple[str, ...], str]:
+    """Decode pg_trigger.tgtype bitmask into (timing, sorted_events, for_each)."""
+    for_each = "ROW" if (tgtype & 1) else "STATEMENT"
+    if tgtype & 2:
+        timing = "BEFORE"
+    elif tgtype & 64:
+        timing = "INSTEAD OF"
+    else:
+        timing = "AFTER"
+    events: list[str] = []
+    if tgtype & 4:
+        events.append("INSERT")
+    if tgtype & 8:
+        events.append("DELETE")
+    if tgtype & 16:
+        events.append("UPDATE")
+    if tgtype & 32:
+        events.append("TRUNCATE")
+    return timing, tuple(sorted(events)), for_each
+
+
+def _normalize_plpgsql_body(body: str) -> str:
+    return re.sub(r"\s+", " ", body.strip()).strip()
 
 
 def introspect_database(
@@ -146,7 +331,6 @@ def introspect_database(
 
             existing = sorted(snapshot.schemas)
 
-            # Tables
             table_rows = conn.execute(
                 text(
                     "SELECT n.nspname, c.relname "
@@ -165,7 +349,6 @@ def introspect_database(
             if not snapshot.tables:
                 return snapshot
 
-            # Columns (using format_type for exact TIMESTAMPTZ/vector(N) precision)
             col_rows = conn.execute(
                 text(
                     "SELECT n.nspname, c.relname, a.attname, "
@@ -194,10 +377,11 @@ def introspect_database(
                         default=default_expr,
                     )
 
-            # Constraints & constraint-backing indexes
             con_rows = conn.execute(
                 text(
-                    "SELECT n.nspname, c.relname, con.conname, ic.relname AS idx_name "
+                    "SELECT n.nspname, c.relname, con.conname, con.contype::text, "
+                    "       pg_catalog.pg_get_constraintdef(con.oid, true) AS condef, "
+                    "       ic.relname AS idx_name "
                     "FROM pg_catalog.pg_constraint con "
                     "JOIN pg_catalog.pg_class c ON c.oid = con.conrelid "
                     "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
@@ -206,42 +390,52 @@ def introspect_database(
                 ),
                 {"schemas": existing},
             ).fetchall()
-            for schema_name, table_name, con_name, idx_name in con_rows:
+            for schema_name, table_name, con_name, contype, condef, idx_name in con_rows:
                 tbl = snapshot.tables.get((schema_name, table_name))
                 if tbl is not None:
-                    tbl.constraints.add(con_name)
+                    tbl.constraints[con_name] = (contype, condef)
                     if idx_name:
                         tbl.constraint_indexes.add(idx_name)
 
-            # Indexes
             idx_rows = conn.execute(
                 text(
-                    "SELECT schemaname, tablename, indexname "
+                    "SELECT schemaname, tablename, indexname, indexdef "
                     "FROM pg_catalog.pg_indexes "
                     "WHERE schemaname = ANY(:schemas)"
                 ),
                 {"schemas": existing},
             ).fetchall()
-            for schema_name, table_name, idx_name in idx_rows:
+            for schema_name, table_name, idx_name, indexdef in idx_rows:
                 tbl = snapshot.tables.get((schema_name, table_name))
                 if tbl is not None:
-                    tbl.indexes.add(idx_name)
+                    tbl.indexes[idx_name] = indexdef
 
-            # User triggers
             trg_rows = conn.execute(
                 text(
-                    "SELECT n.nspname, c.relname, t.tgname "
+                    "SELECT n.nspname, c.relname, t.tgname, t.tgtype, "
+                    "       pn.nspname AS fn_schema, p.proname AS fn_name, p.prosrc AS fn_body "
                     "FROM pg_catalog.pg_trigger t "
                     "JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid "
                     "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+                    "JOIN pg_catalog.pg_proc p ON p.oid = t.tgfoid "
+                    "JOIN pg_catalog.pg_namespace pn ON pn.oid = p.pronamespace "
                     "WHERE n.nspname = ANY(:schemas) AND NOT t.tgisinternal"
                 ),
                 {"schemas": existing},
             ).fetchall()
-            for schema_name, table_name, tg_name in trg_rows:
+            for schema_name, table_name, tg_name, tgtype, fn_schema, fn_name, fn_body in trg_rows:
                 tbl = snapshot.tables.get((schema_name, table_name))
                 if tbl is not None:
-                    tbl.triggers.add(tg_name)
+                    timing, events, for_each = _decode_trigger_events(int(tgtype))
+                    tbl.triggers[tg_name] = IntrospectedTrigger(
+                        name=tg_name,
+                        timing=timing,
+                        events=events,
+                        for_each=for_each,
+                        function_schema=fn_schema,
+                        function_name=fn_name,
+                        function_body=fn_body or "",
+                    )
     finally:
         if owns_engine:
             db_engine.dispose()
@@ -295,32 +489,57 @@ class MigrationPlan:
         return analyze_migration(self.upgrade_statements)
 
 
-def _expected_constraints(table) -> list[tuple[str, str]]:
-    """Return [(constraint_name, clause)] for CHECK & UNIQUE constraints on a table."""
-    items: list[tuple[str, str]] = []
+def _expected_checks(table: TableSpec) -> dict[str, tuple[str, str]]:
+    """Return {constraint_name: (add_clause, raw_expr)} for CHECK constraints."""
+    out: dict[str, tuple[str, str]] = {}
     for col in table.columns:
         if col.check:
             cname = f"chk_{table.name}_{col.name}"
-            items.append((cname, f'CONSTRAINT "{cname}" CHECK ({col.check})'))
+            out[cname] = (f'CONSTRAINT "{cname}" CHECK ({col.check})', col.check)
     for chk in table.check_constraints:
-        items.append((chk.name, f'CONSTRAINT "{chk.name}" CHECK ({chk.expression})'))
+        out[chk.name] = (
+            f'CONSTRAINT "{chk.name}" CHECK ({chk.expression})',
+            chk.expression,
+        )
+    return out
+
+
+def _expected_uniques(table: TableSpec) -> dict[str, tuple[str, tuple[str, ...]]]:
+    """Return {constraint_name: (add_clause, cols_tuple)} for UNIQUE constraints."""
+    out: dict[str, tuple[str, tuple[str, ...]]] = {}
     for uq in table.unique_constraints:
         cols_sql = ", ".join(f'"{c}"' for c in uq.columns)
-        items.append((uq.name, f'CONSTRAINT "{uq.name}" UNIQUE ({cols_sql})'))
-    return items
+        out[uq.name] = (
+            f'CONSTRAINT "{uq.name}" UNIQUE ({cols_sql})',
+            tuple(uq.columns),
+        )
+    return out
 
 
-def _expected_fks(table, schema: str) -> list[tuple[str, str]]:
-    """Return [(fk_name, alter_table_sql)] for a table."""
-    stmts = compile_table_foreign_keys(table, schema)
-    names: list[str] = []
-    for col in table.columns:
-        if col.references:
-            parse_reference(col.references)
-            names.append(f"fk_{table.name}_{col.name}")
-    for fk in table.foreign_keys:
-        names.append(fk.name)
-    return list(zip(names, stmts))
+def _expected_fks(table: TableSpec, schema: str) -> dict[str, tuple[tuple, str]]:
+    """Return {fk_name: (normalized_tuple, alter_table_sql)} for a table."""
+    out: dict[str, tuple[tuple, str]] = {}
+    for fk_name, src_cols, target_ref, on_delete, on_update in iter_table_foreign_keys(table):
+        ref_schema, ref_table, ref_cols = parse_reference(target_ref)
+        fk_sql = compile_fk_constraint(
+            name=fk_name,
+            src_cols=src_cols,
+            references=target_ref,
+            on_delete=on_delete,
+            on_update=on_update,
+            table_name=table.name,
+            schema_name=schema,
+        )
+        sig = (
+            tuple(src_cols),
+            ref_schema,
+            ref_table,
+            tuple(ref_cols),
+            on_delete.upper(),
+            on_update.upper(),
+        )
+        out[fk_name] = (sig, fk_sql)
+    return out
 
 
 def compute_migration_plan(
@@ -368,7 +587,7 @@ def compute_migration_plan(
                     )
                 )
 
-                for fk_name, fk_sql in _expected_fks(table, schema):
+                for fk_name, (_, fk_sql) in _expected_fks(table, schema).items():
                     deferred_fks.append(
                         DiffOp(
                             kind="add_fk",
@@ -412,7 +631,7 @@ def compute_migration_plan(
                     )
                 continue
 
-            # Existing table: diff columns
+            # Existing table: diff columns (type, nullable, default)
             desired_cols = {c.name: c for c in table.columns}
             for col in table.columns:
                 live_col = existing.columns.get(col.name)
@@ -439,6 +658,7 @@ def compute_migration_plan(
                         f'ALTER TABLE {fq} ALTER COLUMN "{col.name}" '
                         f'TYPE {target_pg} USING "{col.name}"::{target_pg};'
                     )
+                    validate_sql_ast(alter_stmt)
                     plan.ops.append(
                         DiffOp(
                             kind="alter_column_type",
@@ -476,6 +696,41 @@ def compute_migration_plan(
                         )
                     )
 
+                # Column DEFAULT drift check (ignore implicit nextval sequence defaults on *SERIAL)
+                is_serial = col.type.strip().upper() in {"SERIAL", "BIGSERIAL", "SMALLSERIAL"}
+                desired_default = normalize_default_expr(col.default)
+                live_default = normalize_default_expr(live_col.default)
+                if not (is_serial and col.default is None and live_default and live_default.startswith("nextval(")):
+                    if desired_default != live_default:
+                        if desired_default is None:
+                            def_stmt = f'ALTER TABLE {fq} ALTER COLUMN "{col.name}" DROP DEFAULT;'
+                        else:
+                            def_stmt = (
+                                f'ALTER TABLE {fq} ALTER COLUMN "{col.name}" '
+                                f"SET DEFAULT {col.default};"
+                            )
+                        if live_default is None:
+                            rev_def = f'ALTER TABLE {fq} ALTER COLUMN "{col.name}" DROP DEFAULT;'
+                        else:
+                            rev_def = (
+                                f'ALTER TABLE {fq} ALTER COLUMN "{col.name}" '
+                                f"SET DEFAULT {live_col.default};"
+                            )
+                        validate_sql_ast(def_stmt)
+                        plan.ops.append(
+                            DiffOp(
+                                kind="alter_default",
+                                schema=schema,
+                                table=table.name,
+                                description=(
+                                    f"~ ALTER COLUMN {schema}.{table.name}.{col.name} "
+                                    f"DEFAULT {live_default} -> {desired_default}"
+                                ),
+                                upgrade_sql=[def_stmt],
+                                downgrade_sql=[rev_def],
+                            )
+                        )
+
             for live_col_name in sorted(existing.columns.keys()):
                 if live_col_name not in desired_cols:
                     drop_stmt = f'ALTER TABLE {fq} DROP COLUMN "{live_col_name}";'
@@ -491,27 +746,120 @@ def compute_migration_plan(
                         )
                     )
 
-            # Missing CHECK / UNIQUE constraints on existing table
-            for con_name, con_clause in _expected_constraints(table):
-                if con_name not in existing.constraints:
-                    con_stmt = f"ALTER TABLE {fq} ADD {con_clause};"
-                    validate_sql_ast(con_stmt)
+            # Diff CHECK constraints (missing, modified, or removed)
+            desired_checks = _expected_checks(table)
+            for chk_name, (chk_clause, raw_expr) in desired_checks.items():
+                live_entry = existing.constraints.get(chk_name)
+                if live_entry is None:
+                    add_chk = f"ALTER TABLE {fq} ADD {chk_clause};"
+                    validate_sql_ast(add_chk)
                     plan.ops.append(
                         DiffOp(
                             kind="add_constraint",
                             schema=schema,
                             table=table.name,
-                            description=f"+ ADD CONSTRAINT {schema}.{table.name}.{con_name}",
-                            upgrade_sql=[con_stmt],
+                            description=f"+ ADD CHECK {schema}.{table.name}.{chk_name}",
+                            upgrade_sql=[add_chk],
                             downgrade_sql=[
-                                f'ALTER TABLE {fq} DROP CONSTRAINT IF EXISTS "{con_name}";'
+                                f'ALTER TABLE {fq} DROP CONSTRAINT IF EXISTS "{chk_name}";'
+                            ],
+                        )
+                    )
+                elif normalize_check_expr(raw_expr) != normalize_check_expr(live_entry[1]):
+                    drop_old = f'ALTER TABLE {fq} DROP CONSTRAINT IF EXISTS "{chk_name}";'
+                    add_new = f"ALTER TABLE {fq} ADD {chk_clause};"
+                    validate_sql_ast(drop_old)
+                    validate_sql_ast(add_new)
+                    plan.ops.append(
+                        DiffOp(
+                            kind="alter_constraint",
+                            schema=schema,
+                            table=table.name,
+                            description=f"~ REPLACE CHECK {schema}.{table.name}.{chk_name}",
+                            upgrade_sql=[drop_old, add_new],
+                            downgrade_sql=[
+                                f'ALTER TABLE {fq} DROP CONSTRAINT IF EXISTS "{chk_name}";',
+                                f'ALTER TABLE {fq} ADD CONSTRAINT "{chk_name}" {live_entry[1]};',
                             ],
                         )
                     )
 
-            # Missing FKs on existing table
-            for fk_name, fk_sql in _expected_fks(table, schema):
-                if fk_name not in existing.constraints:
+            # Diff UNIQUE constraints (missing, modified, or removed)
+            desired_uniques = _expected_uniques(table)
+            for uq_name, (uq_clause, uq_cols) in desired_uniques.items():
+                live_entry = existing.constraints.get(uq_name)
+                if live_entry is None:
+                    add_uq = f"ALTER TABLE {fq} ADD {uq_clause};"
+                    validate_sql_ast(add_uq)
+                    plan.ops.append(
+                        DiffOp(
+                            kind="add_constraint",
+                            schema=schema,
+                            table=table.name,
+                            description=f"+ ADD UNIQUE {schema}.{table.name}.{uq_name}",
+                            upgrade_sql=[add_uq],
+                            downgrade_sql=[
+                                f'ALTER TABLE {fq} DROP CONSTRAINT IF EXISTS "{uq_name}";'
+                            ],
+                        )
+                    )
+                elif uq_cols != _normalize_unique_cols(live_entry[1]):
+                    drop_old = f'ALTER TABLE {fq} DROP CONSTRAINT IF EXISTS "{uq_name}";'
+                    add_new = f"ALTER TABLE {fq} ADD {uq_clause};"
+                    validate_sql_ast(drop_old)
+                    validate_sql_ast(add_new)
+                    plan.ops.append(
+                        DiffOp(
+                            kind="alter_constraint",
+                            schema=schema,
+                            table=table.name,
+                            description=f"~ REPLACE UNIQUE {schema}.{table.name}.{uq_name}",
+                            upgrade_sql=[drop_old, add_new],
+                            downgrade_sql=[
+                                f'ALTER TABLE {fq} DROP CONSTRAINT IF EXISTS "{uq_name}";',
+                                f'ALTER TABLE {fq} ADD CONSTRAINT "{uq_name}" {live_entry[1]};',
+                            ],
+                        )
+                    )
+
+            # Dropped CHECK or UNIQUE constraints
+            for con_name, (contype, condef) in sorted(existing.constraints.items()):
+                if contype == "c" and con_name not in desired_checks:
+                    drop_c = f'ALTER TABLE {fq} DROP CONSTRAINT IF EXISTS "{con_name}";'
+                    validate_sql_ast(drop_c)
+                    deferred_drops.append(
+                        DiffOp(
+                            kind="drop_constraint",
+                            schema=schema,
+                            table=table.name,
+                            description=f"- DROP CHECK {schema}.{table.name}.{con_name}",
+                            upgrade_sql=[drop_c],
+                            downgrade_sql=[
+                                f'ALTER TABLE {fq} ADD CONSTRAINT "{con_name}" {condef};'
+                            ],
+                        )
+                    )
+                elif contype == "u" and con_name not in desired_uniques:
+                    drop_u = f'ALTER TABLE {fq} DROP CONSTRAINT IF EXISTS "{con_name}";'
+                    validate_sql_ast(drop_u)
+                    deferred_drops.append(
+                        DiffOp(
+                            kind="drop_constraint",
+                            schema=schema,
+                            table=table.name,
+                            description=f"- DROP UNIQUE {schema}.{table.name}.{con_name}",
+                            upgrade_sql=[drop_u],
+                            downgrade_sql=[
+                                f'ALTER TABLE {fq} ADD CONSTRAINT "{con_name}" {condef};'
+                            ],
+                        )
+                    )
+
+            # Diff FKs (missing, modified, or removed)
+            desired_fks = _expected_fks(table, schema)
+            for fk_name, (fk_sig, fk_sql) in desired_fks.items():
+                live_entry = existing.constraints.get(fk_name)
+                if live_entry is None:
                     deferred_fks.append(
                         DiffOp(
                             kind="add_fk",
@@ -524,12 +872,46 @@ def compute_migration_plan(
                             ],
                         )
                     )
+                elif fk_sig != _normalize_fk_def(live_entry[1], schema):
+                    drop_fk = f'ALTER TABLE {fq} DROP CONSTRAINT IF EXISTS "{fk_name}";'
+                    validate_sql_ast(drop_fk)
+                    deferred_fks.append(
+                        DiffOp(
+                            kind="alter_fk",
+                            schema=schema,
+                            table=table.name,
+                            description=f"~ REPLACE FK {schema}.{table.name}.{fk_name}",
+                            upgrade_sql=[drop_fk, fk_sql],
+                            downgrade_sql=[
+                                f'ALTER TABLE {fq} DROP CONSTRAINT IF EXISTS "{fk_name}";',
+                                f'ALTER TABLE {fq} ADD CONSTRAINT "{fk_name}" {live_entry[1]};',
+                            ],
+                        )
+                    )
 
-            # Indexes on existing table
-            desired_idx_names = {idx.name for idx in table.indexes}
+            for con_name, (contype, condef) in sorted(existing.constraints.items()):
+                if contype == "f" and con_name not in desired_fks:
+                    drop_fk = f'ALTER TABLE {fq} DROP CONSTRAINT IF EXISTS "{con_name}";'
+                    validate_sql_ast(drop_fk)
+                    deferred_drops.append(
+                        DiffOp(
+                            kind="drop_constraint",
+                            schema=schema,
+                            table=table.name,
+                            description=f"- DROP FK {schema}.{table.name}.{con_name}",
+                            upgrade_sql=[drop_fk],
+                            downgrade_sql=[
+                                f'ALTER TABLE {fq} ADD CONSTRAINT "{con_name}" {condef};'
+                            ],
+                        )
+                    )
+
+            # Diff Indexes (missing, modified, or removed standalone indexes)
+            desired_idx_map = {idx.name: idx for idx in table.indexes}
             for idx in table.indexes:
-                if idx.name not in existing.indexes:
-                    idx_sql = compile_index(idx, table.name, schema)
+                live_idxdef = existing.indexes.get(idx.name)
+                idx_sql = compile_index(idx, table.name, schema)
+                if live_idxdef is None:
                     deferred_indexes_triggers.append(
                         DiffOp(
                             kind="create_index",
@@ -540,9 +922,25 @@ def compute_migration_plan(
                             downgrade_sql=[f'DROP INDEX IF EXISTS "{schema}"."{idx.name}";'],
                         )
                     )
+                elif _expected_index_signature(idx) != _parse_pg_indexdef(live_idxdef):
+                    drop_old = f'DROP INDEX IF EXISTS "{schema}"."{idx.name}";'
+                    validate_sql_ast(drop_old)
+                    deferred_indexes_triggers.append(
+                        DiffOp(
+                            kind="alter_index",
+                            schema=schema,
+                            table=table.name,
+                            description=f"~ REPLACE INDEX {schema}.{idx.name}",
+                            upgrade_sql=[drop_old, idx_sql],
+                            downgrade_sql=[
+                                f'DROP INDEX IF EXISTS "{schema}"."{idx.name}";',
+                                f"{live_idxdef};",
+                            ],
+                        )
+                    )
 
-            for live_idx in sorted(existing.indexes):
-                if live_idx not in desired_idx_names and live_idx not in existing.constraint_indexes:
+            for live_idx, live_idxdef in sorted(existing.indexes.items()):
+                if live_idx not in desired_idx_map and live_idx not in existing.constraint_indexes:
                     drop_idx = f'DROP INDEX IF EXISTS "{schema}"."{live_idx}";'
                     validate_sql_ast(drop_idx)
                     deferred_drops.append(
@@ -552,14 +950,16 @@ def compute_migration_plan(
                             table=table.name,
                             description=f"- DROP INDEX {schema}.{live_idx}",
                             upgrade_sql=[drop_idx],
-                            downgrade_sql=[],
+                            downgrade_sql=[f"{live_idxdef};"],
                         )
                     )
 
-            # Triggers on existing table
+            # Diff Triggers (missing, changed definition/body, or removed)
+            desired_triggers = {t.name: t for t in table.triggers}
             for trg in table.triggers:
-                if trg.name not in existing.triggers:
-                    trg_stmts = compile_trigger(trg, table.name, schema)
+                live_trg = existing.triggers.get(trg.name)
+                trg_stmts = compile_trigger(trg, table.name, schema)
+                if live_trg is None:
                     deferred_indexes_triggers.append(
                         DiffOp(
                             kind="create_trigger",
@@ -573,11 +973,44 @@ def compute_migration_plan(
                             ],
                         )
                     )
+                else:
+                    trg_changed = (
+                        trg.timing != live_trg.timing
+                        or tuple(sorted(trg.events)) != live_trg.events
+                        or trg.for_each != live_trg.for_each
+                        or trg.function_name != live_trg.function_name
+                        or _normalize_plpgsql_body(trg.function_body)
+                        != _normalize_plpgsql_body(live_trg.function_body)
+                    )
+                    if trg_changed:
+                        deferred_indexes_triggers.append(
+                            DiffOp(
+                                kind="alter_trigger",
+                                schema=schema,
+                                table=table.name,
+                                description=f"~ UPDATE TRIGGER {schema}.{table.name}.{trg.name}",
+                                upgrade_sql=trg_stmts,
+                                downgrade_sql=[],
+                            )
+                        )
 
-        # Tables in DB inside this managed schema that were removed from contract
-        for tbl_schema, tbl_name in sorted(catalog.tables.keys()):
+            for live_trg_name, live_trg in sorted(existing.triggers.items()):
+                if live_trg_name not in desired_triggers:
+                    deferred_drops.append(
+                        DiffOp(
+                            kind="drop_trigger",
+                            schema=schema,
+                            table=table.name,
+                            description=f"- DROP TRIGGER {schema}.{table.name}.{live_trg_name}",
+                            upgrade_sql=[f'DROP TRIGGER IF EXISTS "{live_trg_name}" ON {fq};'],
+                            downgrade_sql=[],
+                        )
+                    )
+
+        # Tables removed from contract (ordered reversed from contract declaration, CASCADE safe)
+        for tbl_schema, tbl_name in reversed(sorted(catalog.tables.keys())):
             if tbl_schema == schema and tbl_name not in desired_tables:
-                drop_tbl = f'DROP TABLE "{schema}"."{tbl_name}";'
+                drop_tbl = f'DROP TABLE IF EXISTS "{schema}"."{tbl_name}" CASCADE;'
                 validate_sql_ast(drop_tbl)
                 deferred_drops.append(
                     DiffOp(
@@ -621,7 +1054,11 @@ def _get_alembic_config(
             "Run the project setup or create the Alembic configuration."
         )
 
-    cfg = AlembicConfig(str(ini_path), stdout=stdout) if stdout is not None else AlembicConfig(str(ini_path))
+    cfg = (
+        AlembicConfig(str(ini_path), stdout=stdout)
+        if stdout is not None
+        else AlembicConfig(str(ini_path))
+    )
     cfg.set_main_option("sqlalchemy.url", to_sqlalchemy_uri(db_uri))
     cfg.set_main_option("script_location", str(root / "alembic"))
     return cfg
@@ -700,52 +1137,103 @@ def create_revision(
     return str(script_path)
 
 
+_TAG_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)?\$")
+
+
 def _split_sql_statements(sql_blob: str) -> list[str]:
-    """Split an Alembic SQL script on semicolons while respecting PL/pgSQL $$ blocks."""
+    """Split an Alembic SQL script on semicolons while respecting quotes, comments, and $tag$ blocks."""
     stmts: list[str] = []
     current: list[str] = []
-    in_dollar_quote = False
     i = 0
     n = len(sql_blob)
+
     while i < n:
-        if sql_blob[i : i + 2] == "$$":
-            in_dollar_quote = not in_dollar_quote
-            current.append("$$")
-            i += 2
-            continue
         ch = sql_blob[i]
-        if ch == ";" and not in_dollar_quote:
+        # Line comment -- ...
+        if ch == "-" and i + 1 < n and sql_blob[i + 1] == "-":
+            end = sql_blob.find("\n", i + 2)
+            chunk = sql_blob[i:] if end == -1 else sql_blob[i : end + 1]
+            current.append(chunk)
+            i = n if end == -1 else end + 1
+            continue
+        # Block comment /* ... */
+        if ch == "/" and i + 1 < n and sql_blob[i + 1] == "*":
+            end = sql_blob.find("*/", i + 2)
+            chunk = sql_blob[i:] if end == -1 else sql_blob[i : end + 2]
+            current.append(chunk)
+            i = n if end == -1 else end + 2
+            continue
+        # Single-quoted string literal
+        if ch == "'":
+            start = i
+            i += 1
+            while i < n:
+                if sql_blob[i] == "'":
+                    if i + 1 < n and sql_blob[i + 1] == "'":
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+            current.append(sql_blob[start:i])
+            continue
+        # Double-quoted identifier
+        if ch == '"':
+            start = i
+            i += 1
+            while i < n:
+                if sql_blob[i] == '"':
+                    if i + 1 < n and sql_blob[i + 1] == '"':
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+            current.append(sql_blob[start:i])
+            continue
+        # Dollar-quoted body ($tag$ ... $tag$)
+        if ch == "$":
+            m = _TAG_RE.match(sql_blob, i)
+            if m:
+                tag = m.group(0)
+                end = sql_blob.find(tag, m.end())
+                if end != -1:
+                    current.append(sql_blob[i : end + len(tag)])
+                    i = end + len(tag)
+                    continue
+        if ch == ";":
             candidate = "".join(current).strip()
             if candidate:
                 stmts.append(candidate + ";")
             current = []
-        else:
-            current.append(ch)
+            i += 1
+            continue
+        current.append(ch)
         i += 1
+
     tail = "".join(current).strip()
     if tail:
         stmts.append(tail)
     return stmts
 
 
+_ALEMBIC_BOOKKEEPING_RE = re.compile(
+    r"^(?:BEGIN\b|COMMIT\b|"
+    r"(?:CREATE\s+TABLE|INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+"
+    r'(?:"?public"?\.)?"?alembic_version"?\b)',
+    re.IGNORECASE,
+)
+
+
 def _filter_user_ddl(statements: list[str]) -> list[str]:
     """Strip Alembic internal bookkeeping SQL before safety classification."""
-    ignored_prefixes = (
-        "BEGIN",
-        "COMMIT",
-        "CREATE TABLE alembic_version",
-        "INSERT INTO alembic_version",
-        "UPDATE alembic_version",
-        "DELETE FROM alembic_version",
-    )
     filtered: list[str] = []
     for stmt in statements:
         lines = [ln for ln in stmt.splitlines() if not ln.strip().startswith("--")]
         body = "\n".join(lines).strip()
         if not body:
             continue
-        upper = body.upper()
-        if any(upper.startswith(p.upper()) for p in ignored_prefixes):
+        if _ALEMBIC_BOOKKEEPING_RE.match(body):
             continue
         filtered.append(body)
     return filtered
@@ -812,7 +1300,11 @@ def get_current_revision(
     db_uri: str,
     project_root: Optional[Path] = None,
 ) -> Optional[str]:
-    """Get the current Alembic migration revision from public.alembic_version."""
+    """Get the current Alembic migration revision from public.alembic_version.
+
+    Returns None when the database is reachable but public.alembic_version
+    has not been created yet; propagates connection errors.
+    """
     engine = create_engine(to_sqlalchemy_uri(db_uri))
     try:
         with engine.connect() as conn:
@@ -821,8 +1313,11 @@ def get_current_revision(
             )
             row = result.fetchone()
             return row[0] if row else None
-    except Exception:
-        return None
+    except SQLAlchemyError as exc:
+        orig = getattr(exc, "orig", None)
+        if isinstance(orig, psycopg.errors.UndefinedTable):
+            return None
+        raise
     finally:
         engine.dispose()
 

@@ -47,11 +47,11 @@ tables:
       - name: "architecture_pattern"
         type: "VARCHAR(50)"
         nullable: false
-        description: "Architecture pattern (staged_gated_pipeline, orchestrator_workers, etc.)."
+        description: "Catalog pattern (stateful_pipeline_with_gates, react_tool_agent, multi_step_planner_agent, lightweight_event_cli_agent, multi_source_lineage_inspector)."
       - name: "runtime"
         type: "VARCHAR(50)"
         nullable: false
-        description: "Target runtime (langgraph, batch, event_stream)."
+        description: "Target runtime (langgraph, python_litellm)."
       - name: "status"
         type: "VARCHAR(30)"
         nullable: false
@@ -493,8 +493,8 @@ tables:
       - name: "stage_type"
         type: "VARCHAR(50)"
         nullable: false
-        check: "stage_type IN ('ingestion', 'validation', 'governance', 'transformation', 'quality', 'publishing', 'custom')"
-        description: "DDLC stage category."
+        check: "stage_type IN ('discovery', 'reasoning', 'code_generation', 'sandbox_testing', 'human_review', 'delivery', 'custom')"
+        description: "Layer 2 DDLC agentic stage category (Decision 26)."
       - name: "started_at"
         type: "TIMESTAMPTZ"
         nullable: false
