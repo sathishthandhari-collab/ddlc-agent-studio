@@ -296,7 +296,7 @@ Six domain specialists, each responsible for one concern. Each specialist is a g
 
 **Responsibilities**:
 - Verify the generated code matches the implementation documents
-- Check contract compliance — every field in every contract has a corresponding implementation
+- Check contract compliance — every field in every contract has a corresponding implementation, and stage `output_schema` references valid contracts or designated compiler wrapper models (e.g. `GeneratedFileSet`)
 - Check quality rule compliance — every contract constraint and stage assertion has corresponding verification
 - Check for hardcoded values — all configuration must be externalized
 - Check shared component usage — reusable components are imported, not duplicated
@@ -387,7 +387,9 @@ The blackboard holds **workflow-driving state** — the data the coordinator and
 
 These concerns are served by the **Metadata Framework** — a separate set of PostgreSQL tables organized into three tiers (generic agent metadata, DDLC shared metadata, and agent-specific metadata). The metadata framework is defined in [`01_metadata_framework.md`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/metadata-framework/01_metadata_framework.md).
 
-Nodes write to the metadata framework as a **side effect** of execution — either via direct calls or (preferably) via LangGraph callback hooks. The blackboard remains focused on what specialists need to do their job, not on what operators need to see after the fact.
+Nodes interact with the metadata framework using a strictly decoupled model (Decision 30):
+- **Passive Operational Telemetry**: LangGraph callback hooks (`MetadataCallbackHandler`) capture non-intrusive runtime telemetry (Tier 1 `agent_run_header`, `execution_log`, step spans, token counts, model pricing) as a side effect without polluting specialist logic.
+- **Transactional Delivery Mutations**: The explicit deterministic Delivery node (Phase 8 in Layer 1; `node_deliver_stage` in Layer 2) performs transactional metadata operations (registering `agent_registry`, `contract_lineage`, Git PR publication, and RAG vector store indexing). This guarantees that registry, catalog, or Git failures surface immediately as explicit errors rather than being swallowed by passive telemetry handlers. The blackboard remains focused on what specialists need to do their job, not on what operators need to see after the fact.
 
 ---
 
@@ -869,7 +871,7 @@ All architecture-level decisions made in this document:
 | 14 | Evaluation post-MVP | Spec-to-output traceability, reference spec test suite, contract simulation | Added when optimizing, not when building. Reduces human review burden and enables regression testing. |
 | 15 | Safety valves | Maximum iteration counts on all loops | Enforced by the coordinator. Clarification, architecture revision, impl doc revision, and build fix loops all have configurable maximums. Escalate to human on exhaustion. |
 | 16 | Change flow reuse | Maintenance flow reuses Documentation, Construction, and Validation phases | Same specialists, same logic, different entry state. No code duplication between build and change flows. |
-| 17 | Metadata write mechanism | LangGraph callback hooks | Keeps metadata writes out of specialist logic. Callback hooks intercept node lifecycle events (start, complete, error) and write metadata as a side effect. |
+| 17 | Metadata write mechanism | Decoupled: Callbacks for Tier 1 Telemetry; Explicit Node for Tier 2 Delivery (Decision 30) | Passive telemetry (timing, token counts, lifecycle spans) is captured non-invasively via LangGraph callback hooks (`MetadataCallbackHandler`). Transactional catalog and lineage updates (`agent_registry`, `contract_lineage`, Git branch/PR delivery) execute within the explicit deterministic Delivery node so operational failures surface cleanly instead of being swallowed. |
 | 18 | Schema provisioning | DCM Schema Engine (Alembic + SQLGlot) | Deterministic schema compiler and migration tool from declarative YAML contracts. Strips probabilistic LLMs from DDL execution, ensures 100% reproducible GitOps migrations. See [`dcm-agent/dcm_agent.md`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/dcm-agent/dcm_agent.md). |
 | 19 | Metadata retention | Keep everything | Permanent retention across all tiers for MVP. Archival/aggregation policies deferred until volume demands it. |
 | 20 | Retire spec.yaml post-build | Single source of truth in `impl_docs/` committed to agent Git repo | Eliminates dual-spec drift. `spec.yaml` is strictly Day-0 intake. Day-2 maintenance modifies `impl_docs/` directly (via Git PR or natural language), never requiring parallel spec synchronization. |
@@ -892,7 +894,7 @@ This document deliberately does not cover:
 - **The implementation doc schema** — Full schema for impl docs → [`implementation-docs/impl_doc_schema.md`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/implementation-docs/impl_doc_schema.md)
 - **Builder generation strategies** — How code is generated per runtime → `builder.md`
 - **Enterprise Governance Integration** — How DDLC agents act as policy consumers of enterprise platforms (Collibra, Immuta, Snowflake DDM) via contract metadata tags and metadata framework lineage (governed externally, not compiled per-agent)
-- **RAG pipeline** — Ingestion, chunking, retrieval tuning → `rag.md`
+- **RAG pipeline** — Ingestion, chunking, retrieval tuning → [`rag/rag.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/rag/rag.md)
 - **Metadata framework DDL & client** — Column-level DDL, callback implementation, Tier 3 generators → [`design-docs/metadata-framework/01_metadata_framework.md`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/metadata-framework/01_metadata_framework.md)
 - **DCM Schema Engine** — Deterministic schema compiler and migration tool with Alembic & SQLGlot → [`design-docs/dcm-agent/dcm_agent.md`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/dcm-agent/dcm_agent.md)
 - **Prompt engineering** — The actual prompts used inside each specialist → implementation detail
@@ -908,4 +910,4 @@ This document deliberately does not cover:
 3. **[`builder.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/builder.md)** — How the builder reads impl docs and compiles agent code per runtime: Deterministic Scaffold Compiler + LLM Leaf Coder (Complete)
 4. **[`dcm-agent/dcm_agent.md`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/dcm-agent/dcm_agent.md)** — DCM Schema Engine: Declarative schema lifecycle with Alembic & SQLGlot from YAML data contracts (MVP — build first)
 5. **[`metadata-framework/01_metadata_framework.md`](file:///S:/DATA/agents/ddlc-agent-studio/design-docs/metadata-framework/01_metadata_framework.md)** — Unified three-tier metadata framework: catalog, lineage, operational, and audit schemas (iterative — evolves alongside development)
-6. **`rag.md`** — RAG pipeline: document ingestion, domain tagging, embedding, retrieval per specialist
+6. **[`rag/rag.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/rag/rag.md)** — RAG pipeline: document ingestion, domain tagging, embedding, retrieval per specialist (Complete)

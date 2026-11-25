@@ -16,7 +16,7 @@ agent:
     - "domain_tag"
 
 architecture:
-  pattern: "stateful_pipeline_with_gates"      # [REQUIRED] Pattern: stateful_pipeline_with_gates | react_tool_agent
+  pattern: "stateful_pipeline_with_gates"      # [REQUIRED] Pattern: stateful_pipeline_with_gates | react_tool_agent | multi_step_planner_agent | lightweight_event_cli_agent | multi_source_lineage_inspector
   runtime: "langgraph"                         # [REQUIRED] Runtime: langgraph | python_litellm
   autonomy_level: "semi_autonomous"            # [REQUIRED] Autonomy: autonomous | semi_autonomous | human_required
 

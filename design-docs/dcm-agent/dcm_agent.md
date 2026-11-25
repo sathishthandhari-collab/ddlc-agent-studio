@@ -99,6 +99,7 @@ tables:
         type: "UUID"
         primary_key: true
         nullable: false
+        default: "gen_random_uuid()"
         description: "Globally unique identifier for this run."
       - name: "parent_run_id"
         type: "UUID"
@@ -107,47 +108,71 @@ tables:
         on_delete: "SET NULL"
         description: "Parent run ID for sub-agent orchestrations."
       - name: "agent_id"
-        type: "VARCHAR(255)"
+        type: "VARCHAR(100)"
         nullable: false
       - name: "agent_version"
-        type: "VARCHAR(64)"
+        type: "VARCHAR(50)"
         nullable: false
-      - name: "run_mode"
-        type: "VARCHAR(32)"
+      - name: "operation_kind"
+        type: "VARCHAR(50)"
         nullable: false
-        check: "run_mode IN ('build', 'change', 'pipeline', 'validation', 'evaluation')"
+        default: "'standard'"
+        description: "Generic run category (standard, build, maintenance, test, eval)."
       - name: "started_at"
         type: "TIMESTAMPTZ"
         nullable: false
-        default: "NOW()"
+        default: "clock_timestamp()"
       - name: "completed_at"
         type: "TIMESTAMPTZ"
         nullable: true
-      - name: "final_status"
-        type: "VARCHAR(32)"
+      - name: "status"
+        type: "VARCHAR(30)"
         nullable: false
-        default: "'RUNNING'"
-        check: "final_status IN ('PENDING', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED', 'PAUSED_GATE')"
+        default: "'running'"
+        check: "status IN ('running', 'completed', 'failed', 'cancelled', 'paused', 'timed_out')"
     indexes:
-      - name: "idx_run_header_agent_lookup"
-        columns: ["agent_id", "started_at"]
-      - name: "idx_run_header_status"
-        columns: ["final_status"]
+      - name: "idx_run_agent_status"
+        columns: ["agent_id", "status"]
+      - name: "idx_run_started_at"
+        columns: ["started_at"]
 
   - name: "execution_log"
     description: "Ordered execution spans capturing telemetry, token counts, and step state."
     columns:
       - name: "log_id"
-        type: "BIGSERIAL"
+        type: "UUID"
         primary_key: true
+        nullable: false
+        default: "gen_random_uuid()"
       - name: "run_id"
         type: "UUID"
         nullable: false
         references: "agent_metadata.agent_run_header(run_id)"
         on_delete: "CASCADE"
-      - name: "node_name"
-        type: "VARCHAR(128)"
+      - name: "parent_log_id"
+        type: "UUID"
+        nullable: true
+        description: "Parent span for nested sub-tasks or tool calls."
+      - name: "step_name"
+        type: "VARCHAR(100)"
         nullable: false
+      - name: "step_type"
+        type: "VARCHAR(30)"
+        nullable: false
+        default: "'node'"
+        check: "step_type IN ('node', 'tool_call', 'llm_call', 'gate', 'system')"
+      - name: "status"
+        type: "VARCHAR(30)"
+        nullable: false
+        default: "'started'"
+        check: "status IN ('started', 'completed', 'failed', 'skipped', 'timed_out')"
+      - name: "started_at"
+        type: "TIMESTAMPTZ"
+        nullable: false
+        default: "clock_timestamp()"
+      - name: "completed_at"
+        type: "TIMESTAMPTZ"
+        nullable: true
       - name: "duration_ms"
         type: "INTEGER"
         nullable: true
@@ -155,9 +180,19 @@ tables:
         type: "JSONB"
         nullable: false
         default: "'{}'::jsonb"
+    unique_constraints:
+      - name: "uq_execution_run_log"
+        columns: ["run_id", "log_id"]
+    foreign_keys:
+      - name: "fk_exec_parent"
+        columns: ["run_id", "parent_log_id"]
+        references: "agent_metadata.execution_log(run_id, log_id)"
+        on_delete: "CASCADE"
     indexes:
       - name: "idx_exec_log_run_seq"
         columns: ["run_id", "log_id"]
+      - name: "idx_exec_parent"
+        columns: ["run_id", "parent_log_id"]
 ```
 
 ---
@@ -166,7 +201,7 @@ tables:
 
 ### 4.1 SQLGlot Compiler (`src/dcm/compiler.py`)
 1. **Contract Ingestion**: Loads and validates YAML structure against a Pydantic `DataContractSchema`.
-2. **Type Mapping & Dialect Safety**: Normalizes abstract types (`UUID`, `TIMESTAMPTZ`, `JSONB`, `BIGSERIAL`) into dialect-correct PostgreSQL types using SQLGlot expressions (`sqlglot.exp`).
+2. **Type Mapping & Dialect Safety**: Normalizes abstract types (`UUID`, `TIMESTAMPTZ`, `JSONB`, `NUMERIC`) into dialect-correct PostgreSQL types using SQLGlot expressions (`sqlglot.exp`).
 3. **Constraint Resolution**: Validates that all `references` point to valid existing tables and columns, checking foreign key referential integrity in memory before generating SQL.
 4. **DDL Generation**: Produces clean, formatted PostgreSQL DDL statements:
    - `CREATE SCHEMA IF NOT EXISTS`

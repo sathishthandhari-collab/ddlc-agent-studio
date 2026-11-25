@@ -3,27 +3,76 @@
 # ============================================================
 # Externalized configuration, environment parameters, and secrets.
 # Follows the "no hardcoding" rule across environments.
+# Stage specs reference these via ${config.<path>} syntax.
+# Secret values reference ${secrets.<name>} and resolve via Secrets Manager.
 # ============================================================
 
-configuration:
-  agent_ref: "agent_unique_identifier"
+config:
+  defaults:
+    sources:
+      source_db:
+        uri: "postgresql://${secrets.source_db_user}:${secrets.source_db_password}@${secrets.source_db_host}:5432/app_db"
+        schema: "public"
 
-  parameters:                                  # Non-sensitive runtime variables
-    batch_size: 1000
-    timeout_seconds: 300
+    destinations:
+      git:
+        repository_url: "https://github.com/org/repo.git"
+        target_branch: "feature/automated-branch"
+        base_branch: "main"
 
-  environments:                                # Environment-specific URI and system mappings
+    dbt:
+      sandbox_project_dir: "/tmp/dbt_sandbox"
+      target_profile: "dev"
+      target_dialect: "snowflake"
+      project_name: "analytics_dbt"
+
+    llm:
+      default_provider: "anthropic"
+      model_tiers:
+        speed: "claude-3-haiku-20240307"
+        reasoning: "claude-3-5-sonnet-20241022"
+        heavy: "claude-3-opus-20240229"
+
+    alerts:
+      channel: "${secrets.slack_webhook_url}"
+
+    logging:
+      level: "INFO"
+      format: "json"
+
+    performance:
+      global_timeout_seconds: 900
+
+  environments:
     development:
-      source_uri: "s3://dev-bucket/data/"
-      dest_uri: "dev-warehouse.database"
-    staging:
-      source_uri: "s3://staging-bucket/data/"
-      dest_uri: "staging-warehouse.database"
-    production:
-      source_uri: "s3://prod-bucket/data/"
-      dest_uri: "prod-warehouse.database"
+      sources:
+        source_db:
+          uri: "postgresql://localhost:5432/app_dev"
+      dbt:
+        sandbox_project_dir: "./sandbox/dbt_dev"
+      logging:
+        level: "DEBUG"
+      performance:
+        global_timeout_seconds: 300
 
-  secrets:                                     # Declared secret keys resolved via Secrets Manager
-    - name: "DATABASE_PASSWORD"
-      description: "Password for destination database connection"
+    staging:
+      sources:
+        source_db:
+          uri: "postgresql://${secrets.source_db_user}:${secrets.source_db_password}@staging-db.internal:5432/app_staging"
+
+    production:
+      # Inherits from defaults
+
+  secrets:
+    - name: source_db_user
+      description: "Database read-only username"
+      required: true
+    - name: source_db_password
+      description: "Database connection password"
+      required: true
+    - name: source_db_host
+      description: "Database connection hostname"
+      required: true
+    - name: github_token
+      description: "GitHub personal access token for Git publication"
       required: true

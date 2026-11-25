@@ -91,7 +91,7 @@ error_strategy:
     action: retry
     max_retries: 3
     retry_delay_seconds: 30
-    escalation: fail
+    escalation: fail_fast
 ```
 
 The Builder reads this spec and generates different code depending on the runtime:
@@ -107,7 +107,7 @@ from src.core.config import settings
 def discover_sources(state: AgentState) -> Dict[str, Any]:
     """Introspects source database schema and updates graph state with profile contract."""
     profile_data = inspect_information_schema(
-        connection_uri=settings.SOURCE_POSTGRES_URI,
+        connection_uri=settings.sources.postgres_oltp.uri,
         target_schema="public"
     )
     # Deterministic contract validation via Pydantic
@@ -238,7 +238,7 @@ agent:
 
 # --- Architecture Selection -----------------------------------
 architecture:
-  pattern: "stateful_pipeline_with_gates"      # Pattern from catalog: stateful_pipeline_with_gates, react_tool_agent
+  pattern: "stateful_pipeline_with_gates"      # Pattern from catalog: stateful_pipeline_with_gates, react_tool_agent, multi_step_planner_agent, lightweight_event_cli_agent, multi_source_lineage_inspector
   runtime: "langgraph"                         # Generation strategy: langgraph, python_litellm
   autonomy_level: "semi_autonomous"            # Autonomy level: autonomous, semi_autonomous, human_required
 
@@ -380,7 +380,10 @@ class LLMConfig(BaseModel):
         description="Path to Jinja2 prompt template: prompts/<name>.jinja2. Enforces Universal Prompt Contract: {input, diagnostics, feedback, config}"
     )
     system_prompt: Optional[str] = Field(None, description="Direct system prompt if not using external Jinja2 file")
-    output_schema: Optional[str] = Field(None, description="Contract name in contracts/<name>.yaml enforced via Instructor")
+    output_schema: Optional[str] = Field(
+        None,
+        description="Target contract name in contracts/<name>.yaml or an allowed built-in compiler wrapper model (e.g. GeneratedFileSet for claim_check artifact staging) enforced via Instructor"
+    )
     temperature: float = Field(default=0.0, ge=0.0, le=1.0)
     max_tokens: int = Field(default=4096)
     cost_cap_usd: Optional[float] = Field(default=None, description="Maximum single-stage LLM spend ceiling")
@@ -401,10 +404,10 @@ class StageProcessing(BaseModel):
     logic_description: Optional[str] = Field(None, description="Bespoke logic description projected directly into Leaf Coder prompt")
 
 class ErrorScenario(BaseModel):
-    action: Literal["retry", "fail", "skip", "escalate", "reflect"]
+    action: Literal["retry", "fail_fast", "skip", "escalate", "reflect"]
     max_retries: Optional[int] = 3
     retry_delay_seconds: Optional[int] = 30
-    escalation: Optional[str] = "fail"
+    escalation: Optional[Literal["fail_fast", "escalate", "skip"]] = "fail_fast"
     log_level: Optional[str] = "INFO"
     details: Optional[str] = None
 
@@ -590,15 +593,9 @@ processing:
     temperature: 0.0
     max_tokens: 8192
     cost_cap_usd: 0.50
-  tools:
-    - name: "validate_sql_ast"
-      type: "custom_code"
-      handler: "tools/sqlglot_verifier.py::validate_sql_ast"
-      signature: "(sql_content: str, dialect: str) -> Tuple[bool, str]"
-      purpose: "Verify SQL syntax and dialect compatibility prior to emission"
-      access: read_only
+  tools: []                                     # Code generation emits structured files directly; verification runs in stage_dry_run
   safety_valves:
-    max_reflection_retries: 3                   # Self-correction loop: reflection on SQL syntax error
+    max_reflection_retries: 3                   # Self-correction loop: reflection on SQL syntax or sandbox compilation error
     timeout_seconds: 180
   logic_description: >
     Generate modular dbt SQL files for each model in transformation_plan:
@@ -608,12 +605,8 @@ processing:
     - sources.yml: declare freshness SLA and database/schema identifiers
 
 error_strategy:
-  on_syntax_error:
-    action: reflect                             # Loops back to LLM with SQLGlot diagnostic error
-    max_retries: 3
-    escalation: fail
   on_generation_failure:
-    action: fail
+    action: fail_fast
     details: "Failed to generate valid dbt artifact bundle"
 
 performance:
@@ -665,6 +658,39 @@ contract:
       type: array
       nullable: false
       description: "List of discovered table profiles with column schemas, primary keys, and row counts"
+      items:
+        type: object
+        model_name: TableProfile
+        fields:
+          - name: table_name
+            type: string
+            nullable: false
+            description: "Table name identifier"
+          - name: schema_name
+            type: string
+            nullable: false
+            description: "Schema namespace"
+          - name: columns
+            type: array
+            nullable: false
+            description: "List of columns discovered in table"
+            items:
+              type: object
+              model_name: ColumnProfile
+              fields:
+                - name: name
+                  type: string
+                  nullable: false
+                  description: "Column identifier"
+                - name: data_type
+                  type: string
+                  nullable: false
+                  description: "SQL data type"
+                - name: primary_key
+                  type: boolean
+                  nullable: false
+                  default: false
+                  description: "Whether column is part of primary key"
 
     - name: discovery_timestamp
       type: timestamp
@@ -1323,6 +1349,7 @@ An implementation document set must satisfy these rules before the Builder proce
 |---|---|
 | Every `pipeline.stages[].stage_id` must have a corresponding `stages/stage_<id>.yaml` | File existence per stage |
 | Every `input.contract` and `output.contract` must have a corresponding `contracts/<name>.yaml` | File existence per contract |
+| Every `processing.llm_config.output_schema` must match a contract in `contracts/<name>.yaml` OR an allowed built-in compiler wrapper model (`GeneratedFileSet`) | LLM output schema cross-reference resolution |
 | Every `${config.*}` must resolve in `config.yaml` | Config path resolution |
 | Every `${secrets.*}` must appear in `config.yaml`'s `secrets` list | Secret registration |
 | Pipeline `next` must reference a valid `stage_id` or be `null` | Stage reference check |

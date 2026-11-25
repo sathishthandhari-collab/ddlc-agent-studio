@@ -401,7 +401,7 @@ cross_agent:
                                     #   - name: "metadata_telemetry_callback"
                                     #     version: "1.0.0"
                                     #     usage: "Tier 1 agent run logging and prompt token telemetry"
-                                    #   - name: "gitops_pr_client"
+                                    #   - name: "git_deliverer_v1"
                                     #     version: "2.1.0"
                                     #     usage: "Shared GitHub/GitLab PR automation wrapper"
 
@@ -612,9 +612,39 @@ contracts:
       keys, and constraints discovered across source schemas.
     direction: "internal"
     fields:
+      - name: "database_name"
+        type: "string"
+        description: "Source database catalog name"
+        quality_rules: ["must not be empty"]
       - name: "tables"
         type: "array"
         description: "List of discovered tables with column definitions and primary keys"
+        items:
+          type: "object"
+          model_name: "TableProfile"
+          fields:
+            - name: "table_name"
+              type: "string"
+              description: "Source table identifier"
+            - name: "schema_name"
+              type: "string"
+              description: "Schema namespace"
+            - name: "columns"
+              type: "array"
+              description: "List of column definitions"
+              items:
+                type: "object"
+                model_name: "ColumnProfile"
+                fields:
+                  - name: "name"
+                    type: "string"
+                    description: "Column name"
+                  - name: "data_type"
+                    type: "string"
+                    description: "SQL data type"
+                  - name: "primary_key"
+                    type: "boolean"
+                    description: "Whether column is part of primary key"
         quality_rules: ["must contain at least one table definition"]
       - name: "foreign_keys"
         type: "array"
@@ -748,6 +778,12 @@ contracts:
       and opened Pull Request URL.
     direction: "output"
     fields:
+      - name: "manifest_id"
+        type: "string"
+        description: "Unique UUID identifying this delivery manifest"
+      - name: "run_id"
+        type: "string"
+        description: "Run ID that generated this delivery"
       - name: "repository"
         type: "string"
         description: "Git repository slug (e.g. 'org/analytics-dbt-repo')"
@@ -764,6 +800,13 @@ contracts:
         type: "string"
         description: "URL of the created Pull Request"
         quality_rules: ["must be a valid URL"]
+      - name: "artifact_sha256"
+        type: "string"
+        description: "Cryptographic SHA-256 hash of the delivered bundle"
+        quality_rules: ["must match regex ^[a-f0-9]{64}$"]
+      - name: "delivered_at"
+        type: "timestamp"
+        description: "UTC timestamp when the delivery was finalized"
 
 governance:
   approval_gates: ["review"]
@@ -821,7 +864,7 @@ cross_agent:
     - name: "metadata_telemetry_callback"
       version: "1.0.0"
       usage: "Tier 1 agent run logging and prompt token telemetry"
-    - name: "gitops_pr_client"
+    - name: "git_deliverer_v1"
       version: "2.1.0"
       usage: "Shared GitHub/GitLab PR automation wrapper"
   description: >
@@ -997,7 +1040,7 @@ Semantic validation uses LLM reasoning to check logical consistency. These check
 | 3 | Contracts as a separate section (not embedded in stages) | Standalone contract definitions referenced by stage id | Contracts may be shared across multiple stages. Embedding them in stages would force duplication. Separate contracts also enable cross-stage chain validation and cross-agent lineage tracking. |
 | 4 | Enum fields over free text | Enums for type, autonomy, strategy, system, format, classification | Reduces LLM interpretation burden. The Spec Analyst validates against a known set rather than reasoning about arbitrary strings. Free text is reserved for description fields where intent matters. |
 | 5 | Stage ordering by list position | YAML list implies execution order | Explicit ordering avoids ambiguity. The Architect may reorder or parallelize, but the spec expresses the user's intended sequence. |
-| 6 | Quality rules as free text strings | list[string] with natural language rules | Quality rules are too varied to enumerate as an enum. The Documentarian translates these into concrete Instructor/Pydantic validators, Great Expectations assertions, or AST verifiers. LLM interpretation is appropriate here. |
+| 6 | Quality rules as free text strings | list[string] with natural language rules | Quality rules are too varied to enumerate as an enum. The Documentarian translates these into concrete Instructor/Pydantic validators, native dbt generic tests, or AST verifiers. LLM interpretation is appropriate here. |
 | 7 | No credentials in the spec | Connection fields hold URI patterns, not credentials | Credentials belong in config files and secrets managers, never in specification documents. The approach.md rule: no hardcoding. |
 | 8 | Cross-agent references are names, not ids | Reference agents and components by human-readable name | The Spec Analyst and Architect resolve names to registry ids via the metadata framework. Users should not need to know internal ids. |
 | 9 | Governance as a dedicated section | Not distributed across stages | Governance rules often span multiple stages (PII masking in one stage, audit logging across all stages, approval gates at specific stages). Centralizing governance in one section ensures nothing is missed. The Documentarian distributes these to specific enforcement points in the impl docs. |

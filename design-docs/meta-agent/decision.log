@@ -241,6 +241,34 @@
   - Preserves clean separation of concerns: lightweight telemetry handlers remain decoupled from domain-level persistence.
 - **Reference**: [`01_metadata_framework.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/metadata-framework/01_metadata_framework.md), [`builder.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/builder.md), [`architecture.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/architecture.md), [`ddlc-agent-studio-architecture.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/ddlc-agent-studio-architecture.md)
 
+---
+
+### Decision 31: Runtime Bug Fixes, Lazy Settings Injection, Path Traversal Hardening & Contract Nesting Synchronization
+
+- **Date**: 2026-11-20
+- **Status**: Approved
+- **Scope**: Builder Scaffold Compiler (`builder.md`), Blank Templates (`templates/config.yaml`, `templates/stage.yaml`, `templates/agent.yaml`), Impl Doc Schemas (`impl_doc_schema.md`), Input Spec Template (`spec_template.md`).
+- **Context**: 
+  Final pre-implementation code inspection revealed several concrete bugs that would break runtime execution, unit testing, or compilation:
+  1. Blank `config.yaml` template was out of sync with `impl_doc_schema.md` (flat S3 URIs, parameters.batch_size, uppercase secrets).
+  2. Deprecated `datetime.utcnow()` and missing imports; module-level `AgentSettings()` evaluation broke zero-infra unit test imports.
+  3. LLM file generation in `node_generate_stage` was vulnerable to `../../` directory traversal attacks.
+  4. Contract nesting was missing recursive sub-models (`TableProfile`, `ColumnProfile`), breaking typed compilation for Jinja2 prompts.
+  5. Routing and stage wiring mismatches (`on_error` and tool placement) between generate and dry_run.
+- **Decision**:
+  1. **Blank Config Template Sync**: Standardized `templates/config.yaml` to nested blocks (`sources`, `destinations`, `dbt`, `llm`) with lowercase secrets matching Section 4.4 of `impl_doc_schema.md`.
+  2. **Python 3.12+ Timezone & Lazy Settings**: Replaced `utcnow()` with `datetime.now(timezone.utc)`. Added `get_settings()` with `@lru_cache` and test-safe defaults to enable isolated zero-infra unit tests without environment variable dependencies.
+  3. **Path Traversal Hardening**: Enforced `Path(bundle_dir, file_path).resolve()` and asserted `.is_relative_to(base_bundle_dir.resolve())` before writing generated files to disk.
+  4. **Typed Contract Sub-Models**: Formalized `SourceDatabaseReference`, `TableProfile`, and `ColumnProfile` in `contracts_pydantic.py` and YAML specs, enabling 1:1 deterministic compilation for `stage_plan.jinja2`.
+  5. **Stage & Gate Alignment**: Reconciled `node_review_stage` to emit `ReviewedArtifactBundle` only on `"approved"`, reset `reflection_count = 0` on `"revise"`, and wire `compile_dbt_project` + AST linting in `node_dry_run_stage`.
+  6. **Cross-Doc Consistency**: Unified error actions on `fail_fast`, standardized pattern enums to 5 catalog patterns, replaced `gitops_pr_client` with `git_deliverer_v1`, and purged remaining Great Expectations references.
+- **Consequences**:
+  - Guarantees crash-free pytest imports under zero-infra conditions.
+  - Eliminates filesystem security vulnerabilities in generated agents.
+  - Ensures complete contract type fidelity across all 7 stages and prompts.
+- **Reference**: [`builder.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/builder.md), [`impl_doc_schema.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/implementation-docs/impl_doc_schema.md), [`spec_template.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/input-spec-template/spec_template.md), [`config.yaml`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/implementation-docs/templates/config.yaml)
+
+
 
 
 
