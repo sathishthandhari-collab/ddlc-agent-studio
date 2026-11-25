@@ -1,0 +1,646 @@
+# ==============================================================================
+# DDLC Agent Studio — Tier 1 Data Contract
+# Schema: agent_metadata
+# Source of Truth: design-docs/metadata-framework/tier_1_data_dictionary.md
+#
+# This contract is the SINGLE SOURCE OF TRUTH for the agent_metadata schema.
+# DO NOT edit database tables directly — modify this file, then run:
+#   dcm validate contracts/ && dcm plan && dcm revision -m "description" && dcm apply
+# ==============================================================================
+
+version: "1.0"
+schema: "agent_metadata"
+description: >-
+  Universal framework metadata for autonomous agent execution and observability.
+  Domain-agnostic — reusable by any agent system (meta-agent, DDLC agents, or future agents).
+
+tables:
+  # ============================================================================
+  # 3.1 agent_run_header — Master execution lifecycle record
+  # Concern: Operational
+  # ============================================================================
+  - name: "agent_run_header"
+    description: >-
+      Master execution record for an agent workflow run. Serves as the primary
+      anchor (run_id) across all child tables. One row per agent execution.
+    columns:
+      - name: "run_id"
+        type: "UUID"
+        primary_key: true
+        nullable: false
+        default: "gen_random_uuid()"
+        description: "Globally unique execution run identifier."
+      - name: "parent_run_id"
+        type: "UUID"
+        nullable: true
+        default: "NULL"
+        references: "agent_metadata.agent_run_header(run_id)"
+        on_delete: "SET NULL"
+        description: "Parent run ID for sub-agent or child workflow orchestrations."
+      - name: "agent_id"
+        type: "VARCHAR(100)"
+        nullable: false
+        description: "Logical identifier of the agent (e.g., meta-agent, customer-pipeline-agent)."
+      - name: "agent_version"
+        type: "VARCHAR(50)"
+        nullable: false
+        description: "Semantic version of the agent code / configuration."
+      - name: "operation_kind"
+        type: "VARCHAR(50)"
+        nullable: false
+        default: "'standard'"
+        description: "Generic run category (standard, build, maintenance, test, eval). Extensible in Tier 2."
+      - name: "initiator_id"
+        type: "VARCHAR(100)"
+        nullable: false
+        description: "Identity of the initiator (user email, service account, parent agent ID)."
+      - name: "initiator_type"
+        type: "VARCHAR(30)"
+        nullable: false
+        check: "initiator_type IN ('human', 'agent', 'system', 'schedule')"
+        description: "Type of actor initiating the run."
+      - name: "trigger_type"
+        type: "VARCHAR(30)"
+        nullable: false
+        check: "trigger_type IN ('manual', 'api', 'schedule', 'event', 'parent_run')"
+        description: "Invocation mechanism."
+      - name: "source_revision"
+        type: "VARCHAR(100)"
+        nullable: true
+        default: "NULL"
+        description: "Git commit SHA, container image digest, or version tag."
+      - name: "status"
+        type: "VARCHAR(30)"
+        nullable: false
+        default: "'running'"
+        check: "status IN ('running', 'completed', 'failed', 'cancelled', 'paused', 'timed_out')"
+        description: "Run lifecycle status."
+      - name: "started_at"
+        type: "TIMESTAMPTZ"
+        nullable: false
+        default: "clock_timestamp()"
+        description: "Execution start timestamp."
+      - name: "completed_at"
+        type: "TIMESTAMPTZ"
+        nullable: true
+        default: "NULL"
+        description: "Terminal timestamp (enforced by lifecycle check constraints)."
+      - name: "duration_ms"
+        type: "BIGINT"
+        nullable: true
+        default: "NULL"
+        description: "Total run duration in ms (cached rollup for dashboard performance)."
+      - name: "total_input_tokens"
+        type: "INTEGER"
+        nullable: false
+        default: "0"
+        description: "Cached rollup of prompt tokens consumed across all steps."
+      - name: "total_output_tokens"
+        type: "INTEGER"
+        nullable: false
+        default: "0"
+        description: "Cached rollup of completion tokens across all steps."
+      - name: "total_cost_usd"
+        type: "NUMERIC(10,6)"
+        nullable: false
+        default: "0.000000"
+        description: "Cached financial rollup in USD based on model pricing."
+      - name: "run_parameters"
+        type: "JSONB"
+        nullable: false
+        default: "'{}'::jsonb"
+        description: "Sanitized context payload: CLI args, environment variables, non-sensitive flags."
+    check_constraints:
+      - name: "chk_run_duration"
+        expression: "completed_at IS NULL OR completed_at >= started_at"
+      - name: "chk_run_terminal_completed"
+        expression: "status NOT IN ('completed', 'failed', 'cancelled', 'timed_out') OR completed_at IS NOT NULL"
+      - name: "chk_run_running_completed"
+        expression: "status != 'running' OR completed_at IS NULL"
+    indexes:
+      - name: "idx_run_agent_status"
+        columns: ["agent_id", "status"]
+      - name: "idx_run_started_at"
+        columns: ["started_at DESC"]
+      - name: "idx_run_parent"
+        columns: ["parent_run_id"]
+      - name: "idx_run_revision"
+        columns: ["source_revision"]
+
+  # ============================================================================
+  # 3.2 execution_log — Ordered execution spans with telemetry
+  # Concern: Operational
+  # ============================================================================
+  - name: "execution_log"
+    description: >-
+      Time-ordered execution log of individual spans, node tasks, and tool calls
+      within a run. Conforms to structured span semantics with explicit retry
+      tracking and composite same-run integrity.
+    columns:
+      - name: "log_id"
+        type: "UUID"
+        primary_key: true
+        nullable: false
+        default: "gen_random_uuid()"
+        description: "Unique step/span identifier."
+      - name: "run_id"
+        type: "UUID"
+        nullable: false
+        references: "agent_metadata.agent_run_header(run_id)"
+        on_delete: "CASCADE"
+        description: "Execution run reference."
+      - name: "parent_log_id"
+        type: "UUID"
+        nullable: true
+        default: "NULL"
+        description: "Parent span for nested sub-tasks or tool calls (within same run)."
+      - name: "retry_of_log_id"
+        type: "UUID"
+        nullable: true
+        default: "NULL"
+        description: "Points to the previous failed attempt span if this is a retry."
+      - name: "attempt_number"
+        type: "INTEGER"
+        nullable: false
+        default: "1"
+        check: "attempt_number >= 1"
+        description: "Monotonic attempt index for retried operations (1, 2, 3...)."
+      - name: "event_sequence"
+        type: "INTEGER"
+        nullable: false
+        description: "Coordinator dispatch sequence order within the run."
+      - name: "trace_id"
+        type: "VARCHAR(64)"
+        nullable: true
+        default: "NULL"
+        description: "Distributed trace identifier (e.g., OpenTelemetry 128-bit hex)."
+      - name: "span_id"
+        type: "VARCHAR(32)"
+        nullable: true
+        default: "NULL"
+        description: "Distributed span identifier (e.g., OpenTelemetry 64-bit hex)."
+      - name: "step_name"
+        type: "VARCHAR(100)"
+        nullable: false
+        description: "Identifier of the node, agent specialist, or function."
+      - name: "step_type"
+        type: "VARCHAR(30)"
+        nullable: false
+        default: "'node'"
+        check: "step_type IN ('node', 'tool_call', 'llm_call', 'gate', 'system')"
+        description: "Semantic category of the span."
+      - name: "status"
+        type: "VARCHAR(30)"
+        nullable: false
+        default: "'started'"
+        check: "status IN ('started', 'completed', 'failed', 'skipped', 'timed_out')"
+        description: "Span lifecycle status."
+      - name: "started_at"
+        type: "TIMESTAMPTZ"
+        nullable: false
+        default: "clock_timestamp()"
+        description: "Span start timestamp."
+      - name: "completed_at"
+        type: "TIMESTAMPTZ"
+        nullable: true
+        default: "NULL"
+        description: "Span end timestamp."
+      - name: "duration_ms"
+        type: "INTEGER"
+        nullable: true
+        default: "NULL"
+        description: "Span duration in ms (completed_at - started_at)."
+      - name: "model_provider"
+        type: "VARCHAR(50)"
+        nullable: true
+        default: "NULL"
+        description: "Provider name (e.g., anthropic, google, openai, ollama)."
+      - name: "model_used"
+        type: "VARCHAR(100)"
+        nullable: true
+        default: "NULL"
+        description: "Model descriptor (e.g., claude-3-5-sonnet-20241022)."
+      - name: "input_token_count"
+        type: "INTEGER"
+        nullable: false
+        default: "0"
+        description: "Standard prompt/input tokens."
+      - name: "output_token_count"
+        type: "INTEGER"
+        nullable: false
+        default: "0"
+        description: "Completion/output tokens generated."
+      - name: "cached_token_count"
+        type: "INTEGER"
+        nullable: false
+        default: "0"
+        description: "Prompt tokens read from provider cache (critical for cost attribution)."
+      - name: "reasoning_token_count"
+        type: "INTEGER"
+        nullable: false
+        default: "0"
+        description: "Internal reasoning/thought tokens (e.g., o1/Gemini thinking)."
+      - name: "error_type"
+        type: "VARCHAR(100)"
+        nullable: true
+        default: "NULL"
+        description: "Categorized exception name (RateLimitError, ValidationError)."
+      - name: "error_message"
+        type: "TEXT"
+        nullable: true
+        default: "NULL"
+        description: "Sanitized error summary."
+      - name: "stack_trace"
+        type: "TEXT"
+        nullable: true
+        default: "NULL"
+        description: "Sanitized stack trace (truncated to 32KB policy limit)."
+      - name: "details"
+        type: "JSONB"
+        nullable: false
+        default: "'{}'::jsonb"
+        description: "Sanitized input parameters, output summaries, tool parameters."
+    unique_constraints:
+      - name: "uq_execution_run_log"
+        columns: ["run_id", "log_id"]
+    check_constraints:
+      - name: "chk_exec_duration"
+        expression: "completed_at IS NULL OR completed_at >= started_at"
+      - name: "chk_exec_terminal"
+        expression: "status NOT IN ('completed', 'failed', 'skipped', 'timed_out') OR completed_at IS NOT NULL"
+    foreign_keys:
+      - name: "fk_exec_parent"
+        columns: ["run_id", "parent_log_id"]
+        references: "agent_metadata.execution_log(run_id, log_id)"
+        on_delete: "CASCADE"
+      - name: "fk_exec_retry"
+        columns: ["run_id", "retry_of_log_id"]
+        references: "agent_metadata.execution_log(run_id, log_id)"
+        on_delete: "SET NULL"
+    indexes:
+      - name: "idx_exec_run_seq"
+        columns: ["run_id", "event_sequence"]
+      - name: "idx_exec_time_range"
+        columns: ["started_at", "completed_at"]
+      - name: "idx_exec_parent"
+        columns: ["run_id", "parent_log_id"]
+      - name: "idx_exec_otel_trace"
+        columns: ["trace_id", "span_id"]
+      - name: "idx_exec_failed"
+        columns: ["run_id", "error_type"]
+        where: "status = 'failed'"
+
+  # ============================================================================
+  # 3.3 artifact_registry — Central catalog of versioned digital assets
+  # Concern: Catalog
+  # ============================================================================
+  - name: "artifact_registry"
+    description: >-
+      Central catalog of every versioned digital asset produced across runs or
+      registered as pre-existing inputs. Tracks universal storage URIs and
+      cryptographic digests.
+    columns:
+      - name: "artifact_id"
+        type: "UUID"
+        primary_key: true
+        nullable: false
+        default: "gen_random_uuid()"
+        description: "Unique asset identifier."
+      - name: "produced_run_id"
+        type: "UUID"
+        nullable: true
+        default: "NULL"
+        references: "agent_metadata.agent_run_header(run_id)"
+        on_delete: "RESTRICT"
+        description: "Run that generated this artifact. Nullable for external/pre-existing seed inputs."
+      - name: "produced_log_id"
+        type: "UUID"
+        nullable: true
+        default: "NULL"
+        description: "Specific execution span that output this asset."
+      - name: "artifact_name"
+        type: "VARCHAR(255)"
+        nullable: false
+        description: "Logical asset filename (e.g., pipeline_blueprint.md)."
+      - name: "artifact_kind"
+        type: "VARCHAR(50)"
+        nullable: false
+        description: "Generic category (document, code, config, schema, dataset, binary). Extensible."
+      - name: "artifact_version"
+        type: "VARCHAR(50)"
+        nullable: false
+        default: "'1.0.0'"
+        description: "Semantic or content version tag."
+      - name: "storage_uri"
+        type: "TEXT"
+        nullable: false
+        description: "Uniform Resource Identifier (file:///, s3://, gs://, git://)."
+      - name: "checksum_sha256"
+        type: "VARCHAR(64)"
+        nullable: false
+        description: "SHA-256 cryptographic digest of the target content."
+      - name: "byte_size"
+        type: "BIGINT"
+        nullable: true
+        default: "NULL"
+        check: "byte_size IS NULL OR byte_size >= 0"
+        description: "File size in bytes."
+      - name: "mime_type"
+        type: "VARCHAR(100)"
+        nullable: true
+        default: "NULL"
+        description: "MIME content type (e.g., text/markdown, application/json)."
+      - name: "created_at"
+        type: "TIMESTAMPTZ"
+        nullable: false
+        default: "clock_timestamp()"
+        description: "Exact registration timestamp."
+      - name: "metadata"
+        type: "JSONB"
+        nullable: false
+        default: "'{}'::jsonb"
+        description: "Extensible metadata (encoding, language, tags, author)."
+    foreign_keys:
+      - name: "fk_artifact_step"
+        columns: ["produced_run_id", "produced_log_id"]
+        references: "agent_metadata.execution_log(run_id, log_id)"
+        on_delete: "SET NULL"
+    indexes:
+      - name: "idx_artifact_checksum"
+        columns: ["checksum_sha256", "byte_size"]
+      - name: "idx_artifact_kind_name"
+        columns: ["artifact_kind", "artifact_name"]
+      - name: "idx_artifact_producer"
+        columns: ["produced_run_id", "produced_log_id"]
+
+  # ============================================================================
+  # 3.4 artifact_manifest — Run Bill of Materials (input/output lineage)
+  # Concern: Catalog / Lineage
+  # ============================================================================
+  - name: "artifact_manifest"
+    description: >-
+      Maps which artifacts participate in a given run (Bill of Materials).
+      Explicitly links input consumption and output production to execution spans.
+    columns:
+      - name: "manifest_id"
+        type: "UUID"
+        primary_key: true
+        nullable: false
+        default: "gen_random_uuid()"
+        description: "Unique manifest entry ID."
+      - name: "run_id"
+        type: "UUID"
+        nullable: false
+        references: "agent_metadata.agent_run_header(run_id)"
+        on_delete: "CASCADE"
+        description: "Execution run reference."
+      - name: "artifact_id"
+        type: "UUID"
+        nullable: false
+        references: "agent_metadata.artifact_registry(artifact_id)"
+        on_delete: "RESTRICT"
+        description: "Referenced asset from the catalog."
+      - name: "associated_log_id"
+        type: "UUID"
+        nullable: true
+        default: "NULL"
+        description: "Specific step/span that consumed or produced this artifact."
+      - name: "role"
+        type: "VARCHAR(30)"
+        nullable: false
+        check: "role IN ('input', 'output', 'intermediate')"
+        description: "Role of artifact in this execution context."
+      - name: "associated_phase"
+        type: "VARCHAR(50)"
+        nullable: true
+        default: "NULL"
+        description: "Workflow phase or milestone during which this association occurred."
+      - name: "associated_at"
+        type: "TIMESTAMPTZ"
+        nullable: false
+        default: "clock_timestamp()"
+        description: "Timestamp of association."
+    unique_constraints:
+      - name: "uq_run_artifact_role"
+        columns: ["run_id", "artifact_id", "role"]
+    foreign_keys:
+      - name: "fk_manifest_step"
+        columns: ["run_id", "associated_log_id"]
+        references: "agent_metadata.execution_log(run_id, log_id)"
+        on_delete: "SET NULL"
+    indexes:
+      - name: "idx_manifest_artifact_role"
+        columns: ["artifact_id", "role"]
+      - name: "idx_manifest_run_role"
+        columns: ["run_id", "role"]
+
+  # ============================================================================
+  # 3.5 audit_log — Immutable, append-only security/compliance audit trail
+  # Concern: Audit & Compliance
+  # ============================================================================
+  - name: "audit_log"
+    description: >-
+      Legally verifiable, append-only security and compliance audit trail.
+      Captures access control, gate evaluation outcomes, state modifications,
+      and overrides. Immutability enforced via database trigger.
+    columns:
+      - name: "audit_id"
+        type: "UUID"
+        primary_key: true
+        nullable: false
+        default: "gen_random_uuid()"
+        description: "Unique audit record identifier."
+      - name: "run_id"
+        type: "UUID"
+        nullable: true
+        default: "NULL"
+        references: "agent_metadata.agent_run_header(run_id)"
+        on_delete: "RESTRICT"
+        description: "Associated run ID (nullable for system-level administrative actions)."
+      - name: "correlation_id"
+        type: "VARCHAR(100)"
+        nullable: true
+        default: "NULL"
+        description: "Distributed trace/request ID across API gateways or user sessions."
+      - name: "occurred_at"
+        type: "TIMESTAMPTZ"
+        nullable: false
+        default: "clock_timestamp()"
+        description: "Wall-clock timestamp when the action occurred."
+      - name: "recorded_at"
+        type: "TIMESTAMPTZ"
+        nullable: false
+        default: "clock_timestamp()"
+        description: "Database commit timestamp (verifies ingestion latencies)."
+      - name: "action"
+        type: "VARCHAR(100)"
+        nullable: false
+        description: "Security/governance action (gate_approval, gate_override, config_update)."
+      - name: "actor_id"
+        type: "VARCHAR(100)"
+        nullable: false
+        description: "Identity of the actor (user handle, IAM principal, service ID)."
+      - name: "actor_type"
+        type: "VARCHAR(30)"
+        nullable: false
+        check: "actor_type IN ('human', 'agent', 'service_account', 'system')"
+        description: "Actor classification."
+      - name: "target_entity_type"
+        type: "VARCHAR(50)"
+        nullable: false
+        description: "Target type (gate, run, schema, artifact, security_policy)."
+      - name: "target_entity_id"
+        type: "VARCHAR(100)"
+        nullable: true
+        default: "NULL"
+        description: "Identifier of the affected entity."
+      - name: "outcome"
+        type: "VARCHAR(30)"
+        nullable: false
+        default: "'success'"
+        check: "outcome IN ('success', 'denied', 'failed', 'error')"
+        description: "Authorization or operation outcome."
+      - name: "before_state"
+        type: "JSONB"
+        nullable: true
+        default: "NULL"
+        description: "Sanitized state delta or cryptographic hash prior to action."
+      - name: "after_state"
+        type: "JSONB"
+        nullable: true
+        default: "NULL"
+        description: "Sanitized state delta or cryptographic hash after action."
+      - name: "ip_address"
+        type: "INET"
+        nullable: true
+        default: "NULL"
+        description: "Originating client IP address."
+      - name: "user_agent"
+        type: "TEXT"
+        nullable: true
+        default: "NULL"
+        description: "Client software / CLI agent identifier."
+      - name: "details"
+        type: "JSONB"
+        nullable: false
+        default: "'{}'::jsonb"
+        description: "Security context, token hash, permission scopes evaluated."
+    indexes:
+      - name: "idx_audit_occurred_at"
+        columns: ["occurred_at DESC"]
+      - name: "idx_audit_actor"
+        columns: ["actor_id", "occurred_at DESC"]
+      - name: "idx_audit_target"
+        columns: ["target_entity_type", "target_entity_id"]
+      - name: "idx_audit_correlation"
+        columns: ["correlation_id"]
+    triggers:
+      - name: "trg_audit_log_immutable"
+        timing: "BEFORE"
+        events: ["UPDATE", "DELETE"]
+        for_each: "ROW"
+        function_name: "enforce_audit_log_immutability"
+        function_body: |
+          BEGIN
+              RAISE EXCEPTION 'UPDATE and DELETE operations are prohibited on table agent_metadata.audit_log (Compliance Rule SEC-01)';
+          END;
+
+  # ============================================================================
+  # 3.6 decision_log — Explainability ledger for decision points
+  # Concern: Audit & Governance
+  # ============================================================================
+  - name: "decision_log"
+    description: >-
+      Explainability ledger recording both in-flight and completed decision
+      points (routing, model escalations, gate evaluations, human sign-offs).
+    columns:
+      - name: "decision_id"
+        type: "UUID"
+        primary_key: true
+        nullable: false
+        default: "gen_random_uuid()"
+        description: "Unique decision identifier."
+      - name: "run_id"
+        type: "UUID"
+        nullable: false
+        references: "agent_metadata.agent_run_header(run_id)"
+        on_delete: "CASCADE"
+        description: "Execution run reference."
+      - name: "log_id"
+        type: "UUID"
+        nullable: true
+        default: "NULL"
+        description: "Link to the exact execution span where the decision was evaluated."
+      - name: "decision_status"
+        type: "VARCHAR(30)"
+        nullable: false
+        default: "'decided'"
+        check: "decision_status IN ('pending', 'decided', 'rejected', 'cancelled')"
+        description: "Lifecycle status of the decision."
+      - name: "decision_type"
+        type: "VARCHAR(50)"
+        nullable: false
+        description: "Generic category (routing, approval, escalation, fallback, parameter_tuning)."
+      - name: "decision_value"
+        type: "TEXT"
+        nullable: true
+        default: "NULL"
+        description: "Resolved outcome (nullable while decision_status = 'pending')."
+      - name: "decided_by"
+        type: "VARCHAR(100)"
+        nullable: true
+        default: "NULL"
+        description: "Identity of decision maker (nullable while pending)."
+      - name: "decided_by_type"
+        type: "VARCHAR(30)"
+        nullable: true
+        default: "NULL"
+        check: "decided_by_type IS NULL OR decided_by_type IN ('human', 'agent', 'rule_engine')"
+        description: "Type of decider."
+      - name: "rationale"
+        type: "TEXT"
+        nullable: true
+        default: "NULL"
+        description: "Natural-language explanation of why this decision was taken."
+      - name: "alternatives_considered"
+        type: "JSONB"
+        nullable: true
+        default: "NULL"
+        description: "JSON array of rejected alternatives and justification."
+      - name: "confidence_score"
+        type: "NUMERIC(4,3)"
+        nullable: true
+        default: "NULL"
+        check: "confidence_score IS NULL OR confidence_score BETWEEN 0.000 AND 1.000"
+        description: "Confidence score for autonomous decisions."
+      - name: "occurred_at"
+        type: "TIMESTAMPTZ"
+        nullable: false
+        default: "clock_timestamp()"
+        description: "Timestamp when decision point was reached or decided."
+      - name: "details"
+        type: "JSONB"
+        nullable: false
+        default: "'{}'::jsonb"
+        description: "Evaluation rubrics, gate criteria, prompt parameters."
+    check_constraints:
+      - name: "chk_decision_resolution"
+        expression: >-
+          decision_status != 'decided' OR (
+              decision_value IS NOT NULL AND
+              decided_by IS NOT NULL AND
+              decided_by_type IS NOT NULL AND
+              rationale IS NOT NULL
+          )
+    foreign_keys:
+      - name: "fk_decision_step"
+        columns: ["run_id", "log_id"]
+        references: "agent_metadata.execution_log(run_id, log_id)"
+        on_delete: "SET NULL"
+    indexes:
+      - name: "idx_decision_run_time"
+        columns: ["run_id", "occurred_at"]
+      - name: "idx_decision_status"
+        columns: ["decision_status"]
+      - name: "idx_decision_step"
+        columns: ["run_id", "log_id"]

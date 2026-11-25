@@ -51,6 +51,9 @@ dev = [
     "ruff>=0.7.0",
 ]
 
+[project.scripts]
+dcm = "src.dcm.cli:app"
+
 [tool.setuptools.packages.find]
 where = ["src", "."]
 include = ["src*", "dcm*", "core*", "metadata*", "rag*", "coordinator*", "specialists*", "state*", "ui*"]
