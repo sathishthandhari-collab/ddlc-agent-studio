@@ -3,28 +3,30 @@
 # Switch models here without modifying specialist or coordinator code.
 # ==============================================================================
 
+# Open-source models routed via OpenRouter (requires OPENROUTER_API_KEY in .env).
+# Swap any slug with another OpenRouter model (including free router `openrouter/free`).
 tiers:
   heavy:
     description: "Heavy reasoning: gap detection, architecture design, change impact"
-    model: "gemini/gemini-2.5-pro"
+    model: "openrouter/deepseek/deepseek-v3.2"
     temperature: 0.1
     max_tokens: 8192
 
   standard:
     description: "Standard generation: feasibility research, impl docs, leaf code"
-    model: "anthropic/claude-3-5-sonnet-20241022"
+    model: "openrouter/qwen/qwen3-coder"
     temperature: 0.1
     max_tokens: 8192
 
   fast:
     description: "Mechanical checks, formatting, validation summaries"
-    model: "anthropic/claude-3-5-haiku-20241022"
+    model: "openrouter/qwen/qwen3-32b"
     temperature: 0.0
     max_tokens: 4096
 
   embedding:
     description: "Vector embedding model for RAG and component_registry"
-    model: "text-embedding-3-small"
+    model: "openrouter/qwen/qwen3-embedding-8b"
     dimensions: 1536
 
 specialists:

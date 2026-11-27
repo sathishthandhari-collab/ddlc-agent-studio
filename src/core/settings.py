@@ -1,8 +1,9 @@
 """Lazy, typed configuration and environment loaders for DDLC Agent Studio."""
 
+import os
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Sequence
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -34,10 +35,44 @@ class RuntimeEnvSettings(BaseSettings):
     dbt_sandbox_dir: str = "./sandbox/dbt_dev"
 
     # External LLM / Git delivery tokens aligned with .env.example
+    openrouter_api_key: Optional[str] = None
+    openrouter_api_base: Optional[str] = None
+    or_site_url: Optional[str] = None
+    or_app_name: Optional[str] = None
     openai_api_key: Optional[str] = None
     anthropic_api_key: Optional[str] = None
     gemini_api_key: Optional[str] = None
     github_token: Optional[str] = None
+
+    def export_provider_env_vars(
+        self,
+        *,
+        overwrite: bool = False,
+        keys: Optional[Sequence[str]] = None,
+    ) -> dict[str, str]:
+        """Propagate non-empty provider credentials from .env settings into os.environ."""
+        mapping = {
+            "OPENROUTER_API_KEY": self.openrouter_api_key,
+            "OPENROUTER_API_BASE": self.openrouter_api_base,
+            "OR_SITE_URL": self.or_site_url,
+            "OR_APP_NAME": self.or_app_name,
+            "OPENAI_API_KEY": self.openai_api_key,
+            "ANTHROPIC_API_KEY": self.anthropic_api_key,
+            "GEMINI_API_KEY": self.gemini_api_key,
+            "GITHUB_TOKEN": self.github_token,
+        }
+        allowed = {k.upper() for k in keys} if keys is not None else None
+        exported: dict[str, str] = {}
+        for env_name, value in mapping.items():
+            if allowed is not None and env_name not in allowed:
+                continue
+            clean_val = (value or "").strip()
+            if not clean_val:
+                continue
+            if overwrite or not os.environ.get(env_name, "").strip():
+                os.environ[env_name] = clean_val
+                exported[env_name] = env_name
+        return exported
 
 
 class AppPathsConfig(_StrictYamlModel):

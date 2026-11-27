@@ -329,7 +329,8 @@ def _handle_cli_error(exc: BaseException) -> None:
             Panel(
                 f"[bold red]{exc}[/bold red]\n\n"
                 "Configure the required embedding provider API key (for example "
-                "[bold]OPENAI_API_KEY[/bold]) in your environment or .env file.",
+                "[bold]OPENROUTER_API_KEY[/bold] or [bold]OPENAI_API_KEY[/bold]) "
+                "in your environment or .env file.",
                 title="Embedding Configuration Error",
                 border_style="red",
             )

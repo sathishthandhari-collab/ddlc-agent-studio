@@ -41,8 +41,8 @@ rag:
     connection_timeout_seconds: 15
 
   embedding:
-    provider: "openai"
-    model: "text-embedding-3-small"
+    provider: "openrouter"
+    model: "openrouter/qwen/qwen3-embedding-8b"
     dimensions: 1536
     batch_size: 64
     max_retries: 3

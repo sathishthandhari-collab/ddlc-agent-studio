@@ -20,6 +20,18 @@ class EmbeddingConfigError(RuntimeError):
     """Raised immediately when embedding provider credentials or config are invalid."""
 
 
+_PROVIDER_CREDENTIAL_SPECS: dict[str, tuple[tuple[str, ...], str, str]] = {
+    "openai": (("OPENAI_API_KEY",), "openai_api_key", "OPENAI_API_KEY"),
+    "gemini": (("GEMINI_API_KEY", "GOOGLE_API_KEY"), "gemini_api_key", "GEMINI_API_KEY"),
+    "google": (("GEMINI_API_KEY", "GOOGLE_API_KEY"), "gemini_api_key", "GEMINI_API_KEY"),
+    "openrouter": (
+        ("OPENROUTER_API_KEY", "OR_API_KEY"),
+        "openrouter_api_key",
+        "OPENROUTER_API_KEY",
+    ),
+}
+
+
 def _import_litellm() -> Any:
     """Lazy-import LiteLLM with offline-safe local cost-map resolution."""
     os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
@@ -68,36 +80,35 @@ class LiteLLMEmbedder:
         if self.max_retries <= 0:
             raise ValueError(f"max_retries must be positive, got {self.max_retries}.")
 
+        if self.provider.strip().lower() == "openrouter" and not self.model_name.startswith("openrouter/"):
+            self.model_name = f"openrouter/{self.model_name}"
+
     def _validate_provider_credentials(self) -> None:
         """Fail fast with EmbeddingConfigError when required provider credentials are absent."""
         provider_norm = self.provider.strip().lower()
-        if provider_norm == "openai":
-            env_key = os.environ.get("OPENAI_API_KEY", "").strip()
-            if env_key:
-                return
-            settings_key = (get_env_settings().openai_api_key or "").strip()
-            if settings_key:
-                os.environ["OPENAI_API_KEY"] = settings_key
-                return
-            raise EmbeddingConfigError(
-                "OPENAI_API_KEY is not configured for embedding provider 'openai'. "
-                "Set OPENAI_API_KEY in the environment or .env before calling embed_texts()."
+        spec = _PROVIDER_CREDENTIAL_SPECS.get(provider_norm)
+        if spec is None:
+            return
+
+        env_vars, settings_attr, target_env = spec
+        env_settings = get_env_settings()
+        if provider_norm == "openrouter":
+            env_settings.export_provider_env_vars(
+                keys=("OPENROUTER_API_BASE", "OR_SITE_URL", "OR_APP_NAME")
             )
 
-        if provider_norm in {"gemini", "google"}:
-            env_key = (
-                os.environ.get("GEMINI_API_KEY", "").strip()
-                or os.environ.get("GOOGLE_API_KEY", "").strip()
-            )
-            if env_key:
-                return
-            settings_key = (get_env_settings().gemini_api_key or "").strip()
-            if settings_key:
-                os.environ["GEMINI_API_KEY"] = settings_key
-                return
-            raise EmbeddingConfigError(
-                f"GEMINI_API_KEY is not configured for embedding provider '{self.provider}'."
-            )
+        if any(os.environ.get(var, "").strip() for var in env_vars):
+            return
+
+        settings_key = (getattr(env_settings, settings_attr, None) or "").strip()
+        if settings_key:
+            os.environ[target_env] = settings_key
+            return
+
+        raise EmbeddingConfigError(
+            f"{target_env} is not configured for embedding provider '{self.provider}'. "
+            f"Set {target_env} in the environment or .env before calling embed_texts()."
+        )
 
     async def _embed_batch(self, litellm_mod: Any, batch: list[str]) -> list[list[float]]:
         """Execute a single LiteLLM embedding request with exponential retry on transient failures."""

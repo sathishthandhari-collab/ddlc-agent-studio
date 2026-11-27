@@ -1068,6 +1068,90 @@ class TestLiteLLMEmbedder:
         q_vec = await embedder.embed_query("query!")
         assert q_vec == [6.0, 0.0]
 
+    async def test_fails_fast_without_openrouter_api_key_and_loads_from_env_settings(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        monkeypatch.delenv("OR_API_KEY", raising=False)
+        monkeypatch.delenv("OPENROUTER_API_BASE", raising=False)
+        monkeypatch.delenv("OR_APP_NAME", raising=False)
+        monkeypatch.setattr(
+            "src.rag.embeddings.embedder.get_env_settings",
+            lambda: RuntimeEnvSettings(_env_file=tmp_path / ".missing.env"),
+        )
+
+        embedder = LiteLLMEmbedder(
+            model_name="qwen/qwen3-embedding-8b",
+            dimensions=1536,
+            batch_size=4,
+            max_retries=1,
+            provider="openrouter",
+        )
+        assert embedder.model_name == "openrouter/qwen/qwen3-embedding-8b"
+
+        with pytest.raises(EmbeddingConfigError, match="OPENROUTER_API_KEY"):
+            await embedder.embed_texts(["hello openrouter"])
+
+        # Now supply credentials via RuntimeEnvSettings (.env) and verify propagation
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "OPENROUTER_API_KEY=sk-or-v1-test-key\n"
+            "OPENROUTER_API_BASE=https://openrouter.ai/api/v1\n"
+            "OR_APP_NAME=ddlc-agent-studio\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            "src.rag.embeddings.embedder.get_env_settings",
+            lambda: RuntimeEnvSettings(_env_file=env_file),
+        )
+
+        recorded_calls: list[dict[str, Any]] = []
+
+        class _FakeOpenRouterLiteLLM:
+            AuthenticationError = RuntimeError
+
+            async def aembedding(
+                self,
+                *,
+                model: str,
+                input: list[str],
+                dimensions: int,
+            ) -> Any:
+                import os
+
+                recorded_calls.append(
+                    {
+                        "model": model,
+                        "input": list(input),
+                        "dimensions": dimensions,
+                        "api_key": os.environ.get("OPENROUTER_API_KEY"),
+                        "api_base": os.environ.get("OPENROUTER_API_BASE"),
+                        "app_name": os.environ.get("OR_APP_NAME"),
+                    }
+                )
+                return SimpleNamespace(
+                    data=[{"index": idx, "embedding": [0.25] * 3} for idx in range(len(input))]
+                )
+
+        monkeypatch.setattr(
+            "src.rag.embeddings.embedder._import_litellm", lambda: _FakeOpenRouterLiteLLM()
+        )
+
+        vecs = await embedder.embed_texts(["open source llm test"])
+        assert vecs == [[0.25, 0.25, 0.25]]
+        assert recorded_calls == [
+            {
+                "model": "openrouter/qwen/qwen3-embedding-8b",
+                "input": ["open source llm test"],
+                "dimensions": 1536,
+                "api_key": "sk-or-v1-test-key",
+                "api_base": "https://openrouter.ai/api/v1",
+                "app_name": "ddlc-agent-studio",
+            }
+        ]
+
 
 class TestIngestionPipelineAndCLI:
     async def test_dry_run_scans_all_21_real_knowledge_files(self) -> None:
@@ -1192,6 +1276,8 @@ class TestIngestionPipelineAndCLI:
                 return None
 
         monkeypatch.setattr("src.rag.store.pgvector_store.PgVectorRAGStore", _DummyCliStore)
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        monkeypatch.delenv("OR_API_KEY", raising=False)
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         monkeypatch.setattr(
             "src.rag.embeddings.embedder.get_env_settings",
@@ -1204,4 +1290,4 @@ class TestIngestionPipelineAndCLI:
         )
         assert res_err.exit_code == 1
         assert "Embedding Configuration Error" in res_err.output
-        assert "OPENAI_API_KEY" in res_err.output
+        assert "OPENROUTER_API_KEY" in res_err.output
