@@ -1037,7 +1037,7 @@ class MetadataCallbackHandler(BaseCallbackHandler):
             self._finish_span(
                 lc_run_id=run_id,
                 parent_run_id=parent_run_id,
-                fallback_step_name="tool_call",
+                fallback_step_name=str(kwargs.get("name") or "tool_call"),
                 fallback_step_type="tool_call",
                 status="completed",
                 end_details={"output": output},
@@ -1057,7 +1057,7 @@ class MetadataCallbackHandler(BaseCallbackHandler):
             self._finish_span(
                 lc_run_id=run_id,
                 parent_run_id=parent_run_id,
-                fallback_step_name="tool_call",
+                fallback_step_name=str(kwargs.get("name") or "tool_call"),
                 fallback_step_type="tool_call",
                 status="failed",
                 error=error,

@@ -610,9 +610,13 @@ class TestCallbackHardeningEdgeCases:
             t.join(timeout=10)
 
         assert not errors
-        run_inserts = [s for s in conn.statements if "INSERT INTO agent_metadata.agent_run_header" in s[0]]
+        run_inserts = [
+            s for s in conn.statements if 'INSERT INTO "agent_metadata"."agent_run_header"' in s[0]
+        ]
         assert len(run_inserts) == 1
-        span_inserts = [s for s in conn.statements if "INSERT INTO agent_metadata.execution_log" in s[0]]
+        span_inserts = [
+            s for s in conn.statements if 'INSERT INTO "agent_metadata"."execution_log"' in s[0]
+        ]
         assert len(span_inserts) == 4
         seqs = sorted(p["event_sequence"] for _, p in span_inserts)
         assert seqs == [1, 2, 3, 4]
@@ -627,7 +631,9 @@ class TestCallbackHardeningEdgeCases:
         handler.on_tool_end("tool_out", run_id=uuid4(), name="orphan_tool")
         handler.on_llm_error(RuntimeError("sk-orphanSecret1234567890"), run_id=uuid4())
 
-        inserts = [s for s in conn.statements if "INSERT INTO agent_metadata.execution_log" in s[0]]
+        inserts = [
+            s for s in conn.statements if 'INSERT INTO "agent_metadata"."execution_log"' in s[0]
+        ]
         assert len(inserts) == 2
         assert inserts[0][1]["step_name"] == "orphan_tool"
         assert inserts[0][1]["status"] == "completed"
@@ -651,7 +657,7 @@ class TestCallbackHardeningEdgeCases:
         res = handler.complete_run("paused")
         assert res is not None
         sql, params = conn.statements[-1]
-        assert "completed_at = NULL" in sql
+        assert "ELSE NULL" in sql
         assert params["is_terminal"] is False
 
     def test_invalid_inputs_and_retry_span_serialization_are_non_blocking(self) -> None:
@@ -687,5 +693,5 @@ class TestCallbackHardeningEdgeCases:
 
         _, params = conn.statements[-1]
         details_obj = params["details"].obj
-        assert details_obj["truncated"] is True
-        assert "artifact_registry" in details_obj["note"]
+        assert details_obj["_truncated"] is True
+        assert "artifact_registry" in details_obj["storage_hint"]

@@ -490,7 +490,7 @@ class TestCatalogAndLineageLivePostgresIntegration:
                     details={"oversized": "z" * 70_000},
                 )
                 assert gov.payload_sha256 == sha
-                assert gov.details["truncated"] is True
+                assert gov.details["_truncated"] is True
 
                 gate_pending = catalog.record_stage_gate(
                     run_id=run_id,
