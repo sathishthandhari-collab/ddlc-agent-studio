@@ -53,6 +53,7 @@ dev = [
 
 [project.scripts]
 dcm = "src.dcm.cli:app"
+ddlc = "src.rag.ingest:cli_app"
 
 [tool.setuptools.packages.find]
 where = ["src", "."]
