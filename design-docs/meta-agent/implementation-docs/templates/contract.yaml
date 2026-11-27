@@ -1,0 +1,56 @@
+# ============================================================
+# contract.yaml — Data & State Contract Template (Blank)
+# ============================================================
+# Field-level schema, quality rules, and SLAs for agent state and
+# engineering artifacts in transit. Compiles deterministically to
+# Pydantic v2 / Instructor models for LLM structured output.
+# ============================================================
+
+contract:
+  name: "contract_unique_name"                 # [REQUIRED] Matches contract references in stages (input/output)
+  version: "1.0.0"                             # [REQUIRED] Semantic version
+  description: >                               # [REQUIRED]
+    Description of data/artifact shape, meaning, and purpose at this stage boundary.
+  direction: "internal"                        # [REQUIRED] input | internal | output
+  storage_mode: "inline"                       # [REQUIRED] inline (in-memory state) | claim_check (externalized artifact pointer)
+  owner: "analytics-engineering-team"          # [OPTIONAL] Owning team or group
+  classification: "internal"                   # [OPTIONAL] public | internal | confidential | restricted
+  tags:                                        # [OPTIONAL] Semantic catalog tags
+    - "domain_tag"
+
+  # --- Field Definitions --------------------------------------
+  fields:                                      # [REQUIRED] Field-by-field definitions
+    - name: "field_name"                       # [REQUIRED] Attribute identifier
+      type: "string"                           # [REQUIRED] string | integer | float | boolean | timestamp | array | object
+      nullable: false                          # [REQUIRED] true if null/None permitted
+      default: null                            # [OPTIONAL] Default value (e.g. "${now}" for timestamp)
+      description: "Business meaning of field" # [REQUIRED] Human-readable description
+      pii: false                               # [OPTIONAL] true if field contains sensitive personal data
+      pii_category: "none"                     # [OPTIONAL] email_address | phone_number | ssn | ...
+      quality_rules:                           # [OPTIONAL] Field-level validation rules enforced by Instructor / Pydantic
+        - rule: allowed_values                 # allowed_values | range | regex | not_empty
+          values: ["option_a", "option_b"]
+          severity: error                      # error = retry/reject | warning = log
+
+    - name: "nested_array_field"               # Example of typed array of nested sub-models
+      type: "array"
+      nullable: false
+      description: "List of structured nested specifications"
+      items:
+        type: "object"
+        model_name: "NestedItemSpec"           # [REQUIRED for object items] Sub-model compiled to Pydantic class
+        description: "Specification for nested child object"
+        fields:
+          - name: "child_attribute"
+            type: "string"
+            nullable: false
+            description: "Child attribute description"
+
+  # --- Service Level Agreements ------------------------------
+  sla:                                         # [OPTIONAL] Operational expectations for this contract
+    latency:
+      max_processing_seconds: 60
+      description: "Maximum allowable reasoning / stage execution duration"
+    freshness:
+      max_age_hours: 24
+      description: "Data freshness requirement"

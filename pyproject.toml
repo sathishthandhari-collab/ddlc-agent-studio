@@ -1,0 +1,74 @@
+[build-system]
+requires = ["setuptools>=69.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ddlc-agent-studio"
+version = "0.1.0"
+description = "DDLC Agent Studio — Deterministic Meta-Agent Factory, DCM Schema Engine, and Hybrid RAG Platform"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    # Orchestration & LLM Stack
+    "langgraph>=0.2.0",
+    "langgraph-checkpoint-postgres>=2.0.0",
+    "litellm>=1.50.0",
+    "instructor>=1.7.0",
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.6.0",
+    "langchain-core>=0.3.0",
+    "langchain-text-splitters>=0.3.0",
+    "langchain-community>=0.3.0",
+    "tenacity>=9.0.0",
+
+    # Database, DCM Schema Engine & Vector Storage
+    "sqlglot>=25.0.0",
+    "alembic>=1.14.0",
+    "sqlalchemy>=2.0.35",
+    "psycopg[binary,pool]>=3.2.0",
+    "asyncpg>=0.30.0",
+    "pgvector>=0.3.6",
+
+    # RAG Reranking & Tokenization
+    "flashrank>=0.2.9",
+    "tiktoken>=0.8.0",
+
+    # Templating, Config & CLI
+    "jinja2>=3.1.4",
+    "pyyaml>=6.0.2",
+    "typer>=0.13.0",
+    "rich>=13.9.0",
+    "python-dotenv>=1.0.1",
+
+    # UI
+    "chainlit>=2.0.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "ruff>=0.7.0",
+]
+
+[project.scripts]
+dcm = "src.dcm.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src", "."]
+include = ["src*", "dcm*", "core*", "metadata*", "rag*", "coordinator*", "specialists*", "state*", "ui*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "src"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests", "alembic"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]

@@ -2,7 +2,14 @@
 
 ## LangGraph State Machine with LiteLLM + Instructor + LangChain Utilities
 
-> **Document Status**: Draft v0.4  
+> [!NOTE]
+> **Historical Architectural Note (v0.4 Genesis Concept)**  
+> This document reflects the foundational Day-0 design vision for DDLC Agent Studio. For current normative implementation contracts, schemas, and lifecycle rules, consult:
+> - [`architecture.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/architecture.md) (Current Meta-Agent Lifecycle)
+> - [`impl_doc_schema.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/implementation-docs/impl_doc_schema.md) (Single Source of Truth post-build; replaces editing `spec.yaml`)
+> - [`builder.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/meta-agent/builder.md) (Deterministic Scaffold Compiler & Leaf Coder)
+
+> **Document Status**: Draft v0.4 (Archival Reference)  
 > **Last Updated**: 2026-10-31  
 > **Audience**: Architecture & Development Team
 
@@ -10,9 +17,9 @@
 
 ## 1. What We Are Building
 
-We are building a **meta-agent** — an AI system whose job is to build other AI agents.
+We are building a **meta-agent** — an AI system whose job is to build other AI agents (Layer 2 DDLC AI Agents).
 
-You hand it a specification document describing a Data Development Lifecycle (DDLC) agent — its purpose, stages, inputs, outputs, and governance rules — and it produces a working, deployable agent. If you later want to change that agent, you describe the change (or edit the spec), and the meta-agent updates the agent accordingly — code, docs, contracts, all of it.
+You hand it a specification document describing a Data Development Lifecycle (DDLC) agent — its purpose, stages, inputs, outputs, and governance rules — and it produces a working, deployable agent. If you later want to change that agent, you describe the change conversantially or edit the implementation documents (`impl_docs/*.yaml`), and the meta-agent updates the agent accordingly — code, docs, contracts, all of it (Day-0 `spec.yaml` is retired post-build per Decision #23).
 
 The meta-agent is not a chatbot. It is not a code generator. It is a **structured process** that happens to use LLMs for the intelligent work inside that process.
 
@@ -43,7 +50,7 @@ Part A ends with an approved design. Nothing has been built yet.
 
 When a user wants to change an existing agent:
 
-10. **Receive change request** — user describes the change or edits the spec
+10. **Receive change request** — user describes the change or edits the `impl_docs/` directly
 11. **Analyze impact** — determine which stages, contracts, and downstream agents are affected
 12. **Update implementation docs** — modify the source of truth, keeping all contracts in sync
 13. **Rebuild affected components** — the builder regenerates only what changed
@@ -302,28 +309,27 @@ Pure YAML with rich description fields — the same pattern used by OpenAPI, dbt
 
 ```yaml
 agent:
-  name: "customer_data_pipeline"
+  name: "dbt_pipeline_builder_agent"
   description: >
-    Ingests raw customer CSVs from S3, validates quality,
-    masks PII, enriches with derived fields, and publishes
-    to the analytics warehouse.
+    Inspects source database schemas, plans modular dbt models,
+    synthesizes SQL and YAML contracts, dry-runs in a sandbox,
+    and opens a Git Pull Request upon human sign-off.
   version: "1.0.0"
-  autonomy_level: semi-autonomous
+  autonomy_level: semi_autonomous
 
 stages:
-  - id: ingest
-    type: ingestion
+  - id: discover
+    type: discovery
     description: >
-      Pulls daily CSV drops from the S3 raw bucket.
-      Handles schema evolution by logging new columns as warnings.
+      Introspects source database catalogs to extract table schemas,
+      column definitions, data types, and foreign key relationships.
     autonomy: autonomous
     input:
-      source: "s3://data-lake/raw/customers/"
-      contract: customer_raw
+      source: "config://databases.postgres_oltp"
+      contract: source_database_reference
     output:
-      destination: "staging.customer_raw"
-      contract: customer_raw
-    tools: [s3_reader, database_writer]
+      contract: source_schema_profile
+    tools: [inspect_information_schema, query_catalog_lineage]
 ```
 
 ### The Change Flow
@@ -425,6 +431,8 @@ A single Postgres instance handles all persistence needs:
 No separate vector database. No graph database. One database, fully open-source, handles relational data, state persistence, and vector search.
 
 ### 10.2 Portfolio Memory
+
+*(Note: The "Portfolio Memory" conceptual model described below has been formalized into Tier 2 of the unified Metadata Framework — see [`01_metadata_framework.md`](file:///s:/DATA/agents/ddlc-agent-studio/design-docs/metadata-framework/01_metadata_framework.md) and Decision #17).*
 
 The meta-agent maintains awareness of all agents it has built:
 
@@ -554,8 +562,8 @@ All approach-level decisions made during this phase:
 1. **`meta-agent-architecture.md`** — The meta-agent's architecture: state schema, node inventory, edge map, tool sets per node
 2. **`meta-agent-spec_template.md`** — The YAML template users fill in to describe their DDLC agent
 3. **`metaagent-impl-doc-schema.md`** — Full schema for implementation documents: all supported constructs and fields
-4. **`builder.md`** — How the builder reads impl docs and generates agent code
-5. **`governance.md`** — How governance rules flow from spec → impl docs → generated agent enforcement
-6. **`portfolio_memory.md`** — Portfolio memory design: agent registry, component index, dependency tracking, semantic search
+4. **`builder.md`** — How the builder reads impl docs and compiles agent code
+5. **`metadata-framework/01_metadata_framework.md`** — Unified three-tier metadata framework: catalog, lineage, operational, and audit schemas
+6. **`dcm-agent/dcm_agent.md`** — DCM Schema Engine: Declarative schema lifecycle with Alembic & SQLGlot from YAML data contracts
 7. **`rag.md`** — RAG pipeline: document ingestion, embedding, retrieval
 8. **`implementation-docs/`** — directory of all implementation documents

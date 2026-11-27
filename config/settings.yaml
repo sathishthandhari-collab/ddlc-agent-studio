@@ -1,0 +1,81 @@
+# ==============================================================================
+# DDLC Agent Studio — Global Application Settings
+# Externalized runtime parameters (Zero Hardcoding Principle).
+# ==============================================================================
+
+app:
+  name: "ddlc-agent-studio"
+  version: "0.1.0"
+  environment: "development"
+  paths:
+    contracts_dir: "contracts"
+    knowledge_dir: "knowledge"
+    agents_output_dir: "agents"
+    shared_dir: "_shared"
+    sandbox_dir: "sandbox"
+
+database:
+  schemas:
+    tier1: "agent_metadata"
+    tier2: "ddlc_shared_metadata"
+    rag: "rag_knowledge"
+  pool:
+    min_size: 2
+    max_size: 10
+    connection_timeout_seconds: 15
+    statement_timeout_ms: 30000
+
+telemetry:
+  enabled: true
+  stack_trace_max_bytes: 32768
+  inline_payload_max_bytes: 65536
+  redact_patterns:
+    - "sk-[A-Za-z0-9\\-_]{16,}"
+    - "Bearer\\s+[A-Za-z0-9\\-._~+/]+=*"
+
+rag:
+  database:
+    schema_name: "rag_knowledge"
+    pool_min_size: 2
+    pool_max_size: 10
+    connection_timeout_seconds: 15
+
+  embedding:
+    provider: "openai"
+    model: "text-embedding-3-small"
+    dimensions: 1536
+    batch_size: 64
+    max_retries: 3
+
+  chunking:
+    markdown:
+      target_tokens: 350
+      max_tokens: 500
+      overlap_tokens: 50
+    yaml:
+      target_tokens: 300
+      max_tokens: 450
+    code:
+      target_tokens: 350
+      max_tokens: 500
+
+  retrieval:
+    rrf_k: 60
+    initial_candidates: 20
+    reranker:
+      enabled: true
+      engine: "flashrank"
+      model: "ms-marco-TinyBERT-L-2-v2"
+      timeout_ms: 150
+      fallback_to_rrf: true
+
+  budgets:
+    researcher:
+      top_k: 3
+      max_tokens: 1000
+    architect:
+      top_k: 4
+      max_tokens: 1400
+    builder:
+      top_k: 3
+      max_tokens: 1000

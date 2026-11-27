@@ -1,0 +1,797 @@
+# ==============================================================================
+# DDLC Agent Studio — Tier 2 Data Contract
+# Schema: ddlc_shared_metadata
+# Source of Truth: design-docs/metadata-framework/01_metadata_framework.md §4
+#
+# This contract formalizes the column-level design for all 12 Tier 2 tables
+# described conceptually in the metadata framework document.
+# DO NOT edit database tables directly — modify this file, then run:
+#   dcm validate contracts/ && dcm plan && dcm revision -m "description" && dcm apply
+# ==============================================================================
+
+version: "1.0"
+schema: "ddlc_shared_metadata"
+description: >-
+  DDLC-specific shared metadata tables — catalog, lineage, operational, and
+  audit concerns shared across all DDLC agents. Absorbs all former "portfolio
+  memory" tables. Cross-references Tier 1 agent_metadata tables.
+
+tables:
+  # ============================================================================
+  # 4.1 CATALOG TABLES
+  # ============================================================================
+
+  - name: "agent_registry"
+    description: >-
+      Master catalog of all DDLC agents — what exists, current version, status,
+      and ownership. Formerly "portfolio memory — agent registry."
+    columns:
+      - name: "agent_id"
+        type: "VARCHAR(100)"
+        primary_key: true
+        nullable: false
+        description: "Logical agent identifier matching agent_run_header.agent_id."
+      - name: "agent_name"
+        type: "VARCHAR(200)"
+        nullable: false
+        description: "Human-readable display name."
+      - name: "agent_version"
+        type: "VARCHAR(50)"
+        nullable: false
+        description: "Current semantic version of the agent."
+      - name: "description"
+        type: "TEXT"
+        nullable: true
+        default: "NULL"
+        description: "Purpose and scope of the agent."
+      - name: "architecture_pattern"
+        type: "VARCHAR(50)"
+        nullable: false
+        description: "Catalog pattern (stateful_pipeline_with_gates, react_tool_agent, multi_step_planner_agent, lightweight_event_cli_agent, multi_source_lineage_inspector)."
+      - name: "runtime"
+        type: "VARCHAR(50)"
+        nullable: false
+        description: "Target runtime (langgraph, python_litellm)."
+      - name: "status"
+        type: "VARCHAR(30)"
+        nullable: false
+        default: "'draft'"
+        check: "status IN ('draft', 'building', 'active', 'deprecated', 'archived')"
+        description: "Agent lifecycle status."
+      - name: "owner"
+        type: "VARCHAR(100)"
+        nullable: false
+        description: "Team or individual responsible for the agent."
+      - name: "source_repo"
+        type: "TEXT"
+        nullable: true
+        default: "NULL"
+        description: "Git repository URL or path for the agent source."
+      - name: "config_snapshot"
+        type: "JSONB"
+        nullable: false
+        default: "'{}'::jsonb"
+        description: "Serialized agent configuration at registration time."
+      - name: "created_at"
+        type: "TIMESTAMPTZ"
+        nullable: false
+        default: "clock_timestamp()"
+        description: "Registration timestamp."
+      - name: "updated_at"
+        type: "TIMESTAMPTZ"
+        nullable: false
+        default: "clock_timestamp()"
+        description: "Last modification timestamp."
+    indexes:
+      - name: "idx_agent_status"
+        columns: ["status"]
+      - name: "idx_agent_owner"
+        columns: ["owner"]
+
+  - name: "component_registry"
+    description: >-
+      Catalog of all shared reusable components. Includes pgvector embeddings
+      for semantic search ("find something like a PII masker"). Formerly
+      "portfolio memory — shared component index."
+    columns:
+      - name: "component_id"
+        type: "UUID"
+        primary_key: true
+        nullable: false
+        default: "gen_random_uuid()"
+        description: "Unique component identifier."
+      - name: "component_name"
+        type: "VARCHAR(200)"
+        nullable: false
+        description: "Logical name of the shared component."
+      - name: "component_version"
+        type: "VARCHAR(50)"
+        nullable: false
+        description: "Semantic version of the component."
+      - name: "description"
+        type: "TEXT"
+        nullable: false
+        description: "What this component does, its interface and usage."
+      - name: "component_type"
+        type: "VARCHAR(50)"
+        nullable: false
+        check: "component_type IN ('validator', 'transformer', 'connector', 'masker', 'quality_rule', 'utility', 'template')"
+        description: "Category of the shared component."
+      - name: "interface_spec"
+        type: "JSONB"
+        nullable: false
+        default: "'{}'::jsonb"
+        description: "Structured interface contract (input/output types, parameters)."
+      - name: "storage_path"
+        type: "TEXT"
+        nullable: false
+        description: "Path or URI to the component source code."
+      - name: "embedding"
+        type: "VECTOR(1536)"
+        nullable: true
+        default: "NULL"
+        description: "pgvector embedding for semantic component search."
+      - name: "status"
+        type: "VARCHAR(30)"
+        nullable: false
+        default: "'active'"
+        check: "status IN ('draft', 'active', 'deprecated', 'archived')"
+        description: "Component lifecycle status."
+      - name: "created_at"
+        type: "TIMESTAMPTZ"
+        nullable: false
+        default: "clock_timestamp()"
+        description: "Registration timestamp."
+      - name: "updated_at"
+        type: "TIMESTAMPTZ"
+        nullable: false
+        default: "clock_timestamp()"
+        description: "Last modification timestamp."
+    unique_constraints:
+      - name: "uq_component_name_version"
+        columns: ["component_name", "component_version"]
+    indexes:
+      - name: "idx_component_type"
+        columns: ["component_type"]
+      - name: "idx_component_status"
+        columns: ["status"]
+      - name: "idx_component_embedding_hnsw"
+        columns: ["embedding"]
+        method: "hnsw"
+        opclass: "vector_cosine_ops"
+        where: "embedding IS NOT NULL"
+
+  - name: "contract_registry"
+    description: >-
+      Master catalog of all data contracts across all agents. Enables
+      cross-agent lineage and impact analysis.
+    columns:
+      - name: "contract_id"
+        type: "UUID"
+        primary_key: true
+        nullable: false
+        default: "gen_random_uuid()"
+        description: "Unique contract identifier."
+      - name: "agent_id"
+        type: "VARCHAR(100)"
+        nullable: false
+        references: "ddlc_shared_metadata.agent_registry(agent_id)"
+        on_delete: "CASCADE"
+        description: "Owning agent."
+      - name: "contract_name"
+        type: "VARCHAR(200)"
+        nullable: false
+        description: "Logical name of the data contract."
+      - name: "contract_version"
+        type: "VARCHAR(50)"
+        nullable: false
+        description: "Semantic version of the contract."
+      - name: "direction"
+        type: "VARCHAR(20)"
+        nullable: false
+        check: "direction IN ('input', 'output', 'internal')"
+        description: "Data flow direction relative to the agent."
+      - name: "schema_definition"
+        type: "JSONB"
+        nullable: false
+        description: "Full contract schema definition (column types, constraints, SLA)."
+      - name: "status"
+        type: "VARCHAR(30)"
+        nullable: false
+        default: "'active'"
+        check: "status IN ('draft', 'active', 'deprecated', 'archived')"
+        description: "Contract lifecycle status."
+      - name: "registered_at"
+        type: "TIMESTAMPTZ"
+        nullable: false
+        default: "clock_timestamp()"
+        description: "Registration timestamp."
+      - name: "updated_at"
+        type: "TIMESTAMPTZ"
+        nullable: false
+        default: "clock_timestamp()"
+        description: "Last modification timestamp."
+    unique_constraints:
+      - name: "uq_contract_agent_name_version"
+        columns: ["agent_id", "contract_name", "contract_version"]
+    indexes:
+      - name: "idx_contract_agent"
+        columns: ["agent_id"]
+      - name: "idx_contract_direction"
+        columns: ["direction"]
+      - name: "idx_contract_status"
+        columns: ["status"]
+
+  # ============================================================================
+  # 4.2 LINEAGE TABLES
+  # ============================================================================
+
+  - name: "contract_lineage"
+    description: >-
+      Tracks producer → consumer relationships between contracts.
+      "Agent A's output feeds Agent B's input."
+    columns:
+      - name: "lineage_id"
+        type: "UUID"
+        primary_key: true
+        nullable: false
+        default: "gen_random_uuid()"
+        description: "Unique lineage edge identifier."
+      - name: "producer_agent_id"
+        type: "VARCHAR(100)"
+        nullable: false
+        references: "ddlc_shared_metadata.agent_registry(agent_id)"
+        on_delete: "CASCADE"
+        description: "Agent producing the data."
+      - name: "producer_contract_id"
+        type: "UUID"
+        nullable: false
+        references: "ddlc_shared_metadata.contract_registry(contract_id)"
+        on_delete: "CASCADE"
+        description: "Output contract of the producer."
+      - name: "consumer_agent_id"
+        type: "VARCHAR(100)"
+        nullable: false
+        references: "ddlc_shared_metadata.agent_registry(agent_id)"
+        on_delete: "CASCADE"
+        description: "Agent consuming the data."
+      - name: "consumer_contract_id"
+        type: "UUID"
+        nullable: false
+        references: "ddlc_shared_metadata.contract_registry(contract_id)"
+        on_delete: "CASCADE"
+        description: "Input contract of the consumer."
+      - name: "status"
+        type: "VARCHAR(30)"
+        nullable: false
+        default: "'active'"
+        check: "status IN ('active', 'deprecated', 'proposed')"
+        description: "Lineage relationship status."
+      - name: "established_at"
+        type: "TIMESTAMPTZ"
+        nullable: false
+        default: "clock_timestamp()"
+        description: "When the lineage relationship was established."
+    unique_constraints:
+      - name: "uq_lineage_edge"
+        columns: ["producer_contract_id", "consumer_contract_id"]
+    indexes:
+      - name: "idx_lineage_producer"
+        columns: ["producer_agent_id"]
+      - name: "idx_lineage_consumer"
+        columns: ["consumer_agent_id"]
+
+  - name: "agent_dependency"
+    description: >-
+      Cross-agent dependency graph. Answers: "If I change Agent A, which agents
+      are affected?" Formerly "portfolio memory — cross-agent dependencies."
+    columns:
+      - name: "dependency_id"
+        type: "UUID"
+        primary_key: true
+        nullable: false
+        default: "gen_random_uuid()"
+        description: "Unique dependency edge identifier."
+      - name: "upstream_agent_id"
+        type: "VARCHAR(100)"
+        nullable: false
+        references: "ddlc_shared_metadata.agent_registry(agent_id)"
+        on_delete: "CASCADE"
+        description: "Agent being depended upon."
+      - name: "downstream_agent_id"
+        type: "VARCHAR(100)"
+        nullable: false
+        references: "ddlc_shared_metadata.agent_registry(agent_id)"
+        on_delete: "CASCADE"
+        description: "Agent that depends on upstream."
+      - name: "dependency_type"
+        type: "VARCHAR(30)"
+        nullable: false
+        check: "dependency_type IN ('data', 'component', 'config')"
+        description: "Nature of the dependency relationship."
+      - name: "contract_id"
+        type: "UUID"
+        nullable: true
+        default: "NULL"
+        references: "ddlc_shared_metadata.contract_registry(contract_id)"
+        on_delete: "SET NULL"
+        description: "Related contract, if the dependency is data-driven."
+      - name: "status"
+        type: "VARCHAR(30)"
+        nullable: false
+        default: "'active'"
+        check: "status IN ('active', 'deprecated', 'proposed')"
+        description: "Dependency status."
+      - name: "established_at"
+        type: "TIMESTAMPTZ"
+        nullable: false
+        default: "clock_timestamp()"
+        description: "When the dependency was established."
+    unique_constraints:
+      - name: "uq_agent_dep_edge"
+        columns: ["upstream_agent_id", "downstream_agent_id", "dependency_type"]
+    indexes:
+      - name: "idx_dep_upstream"
+        columns: ["upstream_agent_id"]
+      - name: "idx_dep_downstream"
+        columns: ["downstream_agent_id"]
+
+  - name: "component_usage"
+    description: >-
+      Tracks which DDLC agents use which shared components, with version.
+    columns:
+      - name: "usage_id"
+        type: "UUID"
+        primary_key: true
+        nullable: false
+        default: "gen_random_uuid()"
+        description: "Unique usage record identifier."
+      - name: "agent_id"
+        type: "VARCHAR(100)"
+        nullable: false
+        references: "ddlc_shared_metadata.agent_registry(agent_id)"
+        on_delete: "CASCADE"
+        description: "Agent using the component."
+      - name: "component_id"
+        type: "UUID"
+        nullable: false
+        references: "ddlc_shared_metadata.component_registry(component_id)"
+        on_delete: "CASCADE"
+        description: "Component being used."
+      - name: "component_version"
+        type: "VARCHAR(50)"
+        nullable: false
+        description: "Pinned version of the component in use."
+      - name: "usage_type"
+        type: "VARCHAR(30)"
+        nullable: false
+        check: "usage_type IN ('import', 'extend', 'wrap')"
+        description: "How the component is integrated."
+      - name: "first_used_at"
+        type: "TIMESTAMPTZ"
+        nullable: false
+        default: "clock_timestamp()"
+        description: "When the usage was first registered."
+      - name: "last_used_at"
+        type: "TIMESTAMPTZ"
+        nullable: false
+        default: "clock_timestamp()"
+        description: "Most recent usage timestamp."
+    unique_constraints:
+      - name: "uq_component_usage"
+        columns: ["agent_id", "component_id"]
+    indexes:
+      - name: "idx_usage_agent"
+        columns: ["agent_id"]
+      - name: "idx_usage_component"
+        columns: ["component_id"]
+
+  # ============================================================================
+  # 4.3 OPERATIONAL TABLES
+  # ============================================================================
+
+  - name: "build_summary"
+    description: >-
+      Aggregated summary of each DDLC agent build run — operational metrics and
+      revision counts. Formerly "portfolio memory — build history."
+    columns:
+      - name: "build_id"
+        type: "UUID"
+        primary_key: true
+        nullable: false
+        default: "gen_random_uuid()"
+        description: "Unique build summary identifier."
+      - name: "run_id"
+        type: "UUID"
+        nullable: false
+        references: "agent_metadata.agent_run_header(run_id)"
+        on_delete: "CASCADE"
+        description: "Link to the Tier 1 agent run."
+      - name: "agent_id"
+        type: "VARCHAR(100)"
+        nullable: false
+        references: "ddlc_shared_metadata.agent_registry(agent_id)"
+        on_delete: "CASCADE"
+        description: "Agent that was built."
+      - name: "spec_version"
+        type: "VARCHAR(50)"
+        nullable: false
+        description: "Version of the input specification."
+      - name: "clarification_rounds"
+        type: "INTEGER"
+        nullable: false
+        default: "0"
+        description: "Number of spec clarification iterations."
+      - name: "architecture_revisions"
+        type: "INTEGER"
+        nullable: false
+        default: "0"
+        description: "Number of architecture revision iterations."
+      - name: "impl_doc_revisions"
+        type: "INTEGER"
+        nullable: false
+        default: "0"
+        description: "Number of implementation document revision iterations."
+      - name: "build_fix_attempts"
+        type: "INTEGER"
+        nullable: false
+        default: "0"
+        description: "Number of build-test-fix loop attempts."
+      - name: "total_duration_ms"
+        type: "BIGINT"
+        nullable: true
+        default: "NULL"
+        description: "Total build elapsed time in milliseconds."
+      - name: "outcome"
+        type: "VARCHAR(30)"
+        nullable: false
+        check: "outcome IN ('success', 'partial', 'failed', 'cancelled')"
+        description: "Build outcome classification."
+      - name: "completed_at"
+        type: "TIMESTAMPTZ"
+        nullable: true
+        default: "NULL"
+        description: "Build completion timestamp."
+    unique_constraints:
+      - name: "uq_build_run"
+        columns: ["run_id"]
+    indexes:
+      - name: "idx_build_agent"
+        columns: ["agent_id"]
+      - name: "idx_build_outcome"
+        columns: ["outcome"]
+
+  - name: "stage_execution"
+    description: >-
+      Records every DDLC stage execution across all agents. Answers:
+      "How did Stage X perform for Agent Y on this run?"
+    columns:
+      - name: "stage_exec_id"
+        type: "UUID"
+        primary_key: true
+        nullable: false
+        default: "gen_random_uuid()"
+        description: "Unique stage execution identifier."
+      - name: "run_id"
+        type: "UUID"
+        nullable: false
+        references: "agent_metadata.agent_run_header(run_id)"
+        on_delete: "CASCADE"
+        description: "Link to the Tier 1 agent run."
+      - name: "agent_id"
+        type: "VARCHAR(100)"
+        nullable: false
+        description: "Agent whose stage was executed."
+      - name: "stage_id"
+        type: "VARCHAR(100)"
+        nullable: false
+        description: "Logical stage identifier."
+      - name: "stage_name"
+        type: "VARCHAR(200)"
+        nullable: false
+        description: "Human-readable stage name."
+      - name: "stage_type"
+        type: "VARCHAR(50)"
+        nullable: false
+        check: "stage_type IN ('discovery', 'reasoning', 'code_generation', 'sandbox_testing', 'human_review', 'delivery', 'custom')"
+        description: "Layer 2 DDLC agentic stage category (Decision 26)."
+      - name: "started_at"
+        type: "TIMESTAMPTZ"
+        nullable: false
+        default: "clock_timestamp()"
+        description: "Stage execution start time."
+      - name: "completed_at"
+        type: "TIMESTAMPTZ"
+        nullable: true
+        default: "NULL"
+        description: "Stage execution end time."
+      - name: "status"
+        type: "VARCHAR(30)"
+        nullable: false
+        default: "'running'"
+        check: "status IN ('running', 'completed', 'failed', 'skipped')"
+        description: "Stage execution status."
+      - name: "input_artifact_ref"
+        type: "UUID"
+        nullable: true
+        default: "NULL"
+        references: "agent_metadata.artifact_registry(artifact_id)"
+        on_delete: "SET NULL"
+        description: "Reference to input artifact in Tier 1 artifact_registry."
+      - name: "output_artifact_ref"
+        type: "UUID"
+        nullable: true
+        default: "NULL"
+        references: "agent_metadata.artifact_registry(artifact_id)"
+        on_delete: "SET NULL"
+        description: "Reference to output artifact in Tier 1 artifact_registry."
+      - name: "tokens_used"
+        type: "INTEGER"
+        nullable: false
+        default: "0"
+        description: "Total LLM tokens consumed during stage execution."
+      - name: "cost_usd"
+        type: "NUMERIC(10,6)"
+        nullable: false
+        default: "0.000000"
+        description: "Financial cost of the stage in USD."
+      - name: "error_details"
+        type: "JSONB"
+        nullable: false
+        default: "'{}'::jsonb"
+        description: "Structured error information if stage failed."
+    indexes:
+      - name: "idx_stage_run"
+        columns: ["run_id"]
+      - name: "idx_stage_agent"
+        columns: ["agent_id", "stage_id"]
+      - name: "idx_stage_status"
+        columns: ["status"]
+
+  - name: "data_quality_summary"
+    description: >-
+      Aggregated quality metrics and contract assertion scores per stage run.
+      Feeds quality dashboards.
+    columns:
+      - name: "quality_id"
+        type: "UUID"
+        primary_key: true
+        nullable: false
+        default: "gen_random_uuid()"
+        description: "Unique quality record identifier."
+      - name: "run_id"
+        type: "UUID"
+        nullable: false
+        references: "agent_metadata.agent_run_header(run_id)"
+        on_delete: "CASCADE"
+        description: "Link to the Tier 1 agent run."
+      - name: "agent_id"
+        type: "VARCHAR(100)"
+        nullable: false
+        description: "Agent whose quality was measured."
+      - name: "stage_id"
+        type: "VARCHAR(100)"
+        nullable: false
+        description: "Stage during which quality was evaluated."
+      - name: "contract_ref"
+        type: "UUID"
+        nullable: true
+        default: "NULL"
+        references: "ddlc_shared_metadata.contract_registry(contract_id)"
+        on_delete: "SET NULL"
+        description: "Related data contract, if applicable."
+      - name: "assertions_evaluated"
+        type: "INTEGER"
+        nullable: false
+        default: "0"
+        description: "Total number of quality assertions evaluated."
+      - name: "assertions_passed"
+        type: "INTEGER"
+        nullable: false
+        default: "0"
+        description: "Number of assertions that passed."
+      - name: "assertions_failed"
+        type: "INTEGER"
+        nullable: false
+        default: "0"
+        description: "Number of assertions that failed."
+      - name: "quality_score"
+        type: "NUMERIC(5,4)"
+        nullable: true
+        default: "NULL"
+        check: "quality_score IS NULL OR quality_score BETWEEN 0.0000 AND 1.0000"
+        description: "Computed quality score (0.0000 to 1.0000)."
+      - name: "failure_details"
+        type: "JSONB"
+        nullable: false
+        default: "'{}'::jsonb"
+        description: "Structured details of failed assertions."
+      - name: "evaluated_at"
+        type: "TIMESTAMPTZ"
+        nullable: false
+        default: "clock_timestamp()"
+        description: "Quality evaluation timestamp."
+    check_constraints:
+      - name: "chk_quality_counts"
+        expression: "assertions_evaluated >= 0 AND assertions_passed >= 0 AND assertions_failed >= 0"
+    indexes:
+      - name: "idx_quality_run"
+        columns: ["run_id"]
+      - name: "idx_quality_agent_stage"
+        columns: ["agent_id", "stage_id"]
+
+  - name: "config_snapshot"
+    description: >-
+      Captures the full configuration state for DDLC agents to guarantee
+      complete run reproducibility.
+    columns:
+      - name: "snapshot_id"
+        type: "UUID"
+        primary_key: true
+        nullable: false
+        default: "gen_random_uuid()"
+        description: "Unique snapshot identifier."
+      - name: "run_id"
+        type: "UUID"
+        nullable: false
+        references: "agent_metadata.agent_run_header(run_id)"
+        on_delete: "CASCADE"
+        description: "Link to the Tier 1 agent run."
+      - name: "agent_id"
+        type: "VARCHAR(100)"
+        nullable: false
+        description: "Agent whose configuration was captured."
+      - name: "config_type"
+        type: "VARCHAR(50)"
+        nullable: false
+        check: "config_type IN ('model_tiers', 'safety_valves', 'pipeline_settings', 'prompt_templates', 'full')"
+        description: "Category of the captured configuration."
+      - name: "config_body"
+        type: "JSONB"
+        nullable: false
+        description: "Full serialized configuration payload."
+      - name: "captured_at"
+        type: "TIMESTAMPTZ"
+        nullable: false
+        default: "clock_timestamp()"
+        description: "When the configuration snapshot was taken."
+    unique_constraints:
+      - name: "uq_config_run_type"
+        columns: ["run_id", "config_type"]
+    indexes:
+      - name: "idx_config_run"
+        columns: ["run_id"]
+      - name: "idx_config_agent"
+        columns: ["agent_id"]
+
+  # ============================================================================
+  # 4.4 AUDIT TABLES
+  # ============================================================================
+
+  - name: "governance_audit"
+    description: >-
+      Records every governance rule evaluation. Classification tag policy
+      evaluated for model/contract in each stage.
+    columns:
+      - name: "gov_audit_id"
+        type: "UUID"
+        primary_key: true
+        nullable: false
+        default: "gen_random_uuid()"
+        description: "Unique governance audit identifier."
+      - name: "run_id"
+        type: "UUID"
+        nullable: false
+        references: "agent_metadata.agent_run_header(run_id)"
+        on_delete: "CASCADE"
+        description: "Link to the Tier 1 agent run."
+      - name: "agent_id"
+        type: "VARCHAR(100)"
+        nullable: false
+        description: "Agent evaluated."
+      - name: "stage_id"
+        type: "VARCHAR(100)"
+        nullable: false
+        description: "Stage during which the governance rule was evaluated."
+      - name: "rule_id"
+        type: "VARCHAR(100)"
+        nullable: false
+        description: "Identifier of the governance rule."
+      - name: "rule_name"
+        type: "VARCHAR(200)"
+        nullable: false
+        description: "Human-readable name of the rule."
+      - name: "rule_type"
+        type: "VARCHAR(50)"
+        nullable: false
+        check: "rule_type IN ('classification_tagging', 'access_control', 'retention', 'contract_policy', 'custom')"
+        description: "Category of the governance rule."
+      - name: "evaluation_result"
+        type: "VARCHAR(30)"
+        nullable: false
+        check: "evaluation_result IN ('pass', 'fail', 'warning', 'skip')"
+        description: "Outcome of the rule evaluation."
+      - name: "payload_sha256"
+        type: "VARCHAR(64)"
+        nullable: true
+        default: "NULL"
+        description: "Immutable SHA-256 checksum of the governed payload snapshot (Claim Check)."
+      - name: "details"
+        type: "JSONB"
+        nullable: false
+        default: "'{}'::jsonb"
+        description: "Detailed evaluation context, matched entities, remediation."
+      - name: "evaluated_at"
+        type: "TIMESTAMPTZ"
+        nullable: false
+        default: "clock_timestamp()"
+        description: "When the governance rule was evaluated."
+    indexes:
+      - name: "idx_gov_run"
+        columns: ["run_id"]
+      - name: "idx_gov_agent_stage"
+        columns: ["agent_id", "stage_id"]
+      - name: "idx_gov_result"
+        columns: ["evaluation_result"]
+
+  - name: "stage_gate_record"
+    description: >-
+      Records every gate check (human or automated) at DDLC stage boundaries.
+    columns:
+      - name: "gate_id"
+        type: "UUID"
+        primary_key: true
+        nullable: false
+        default: "gen_random_uuid()"
+        description: "Unique gate record identifier."
+      - name: "run_id"
+        type: "UUID"
+        nullable: false
+        references: "agent_metadata.agent_run_header(run_id)"
+        on_delete: "CASCADE"
+        description: "Link to the Tier 1 agent run."
+      - name: "agent_id"
+        type: "VARCHAR(100)"
+        nullable: false
+        description: "Agent whose stage was gated."
+      - name: "stage_id"
+        type: "VARCHAR(100)"
+        nullable: false
+        description: "Stage boundary where the gate was evaluated."
+      - name: "gate_type"
+        type: "VARCHAR(30)"
+        nullable: false
+        check: "gate_type IN ('human_approval', 'automated_check', 'quality_gate')"
+        description: "Category of the gate."
+      - name: "gate_status"
+        type: "VARCHAR(30)"
+        nullable: false
+        check: "gate_status IN ('passed', 'failed', 'overridden', 'pending')"
+        description: "Gate evaluation result."
+      - name: "checked_by"
+        type: "VARCHAR(100)"
+        nullable: true
+        default: "NULL"
+        description: "Identity of whoever checked/approved the gate."
+      - name: "payload_sha256"
+        type: "VARCHAR(64)"
+        nullable: true
+        default: "NULL"
+        description: "Frozen Claim Check payload SHA-256 digest verified across human gate."
+      - name: "notes"
+        type: "TEXT"
+        nullable: true
+        default: "NULL"
+        description: "Free-form notes or rationale for gate decisions."
+      - name: "evaluated_at"
+        type: "TIMESTAMPTZ"
+        nullable: false
+        default: "clock_timestamp()"
+        description: "When the gate was evaluated."
+    indexes:
+      - name: "idx_gate_run"
+        columns: ["run_id"]
+      - name: "idx_gate_agent_stage"
+        columns: ["agent_id", "stage_id"]
+      - name: "idx_gate_status"
+        columns: ["gate_status"]

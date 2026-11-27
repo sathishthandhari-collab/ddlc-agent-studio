@@ -1,0 +1,29 @@
+# ============================================================
+# tests.yaml — Test Suite Specification Template (Blank)
+# ============================================================
+# Declarative test expectations auto-compiled by the Builder.
+# ============================================================
+
+tests:
+  contract_tests:                              # [OPTIONAL] Contract-derived schema and quality rule validations
+    - contract: "contract_unique_name"         # References contracts/<name>.yaml
+      description: "Tests derived from contract specification"
+      cases:
+        - test_id: "test_schema_valid"
+          type: "schema_validation"            # schema_validation | field_quality
+          description: "Verify required contract fields parse cleanly"
+          auto_generate: true
+        - test_id: "test_field_quality"
+          type: "field_quality"
+          description: "Verify field quality rule constraint"
+          field: "field_name"
+          rule: "allowed_values"               # rule name from contract quality_rules
+          auto_generate: true
+
+  custom_tests:                                # [OPTIONAL] Custom integration, stage, and gate tests
+    - test_id: "custom_integration_test"
+      type: "integration"                      # integration | end_to_end | unit
+      description: "Stage-level or multi-stage integration test"
+      stage: "stage_unique_id"                 # Target stage id
+      setup: "Preparation steps or sandbox fixtures"
+      expected_behavior: "Expected outcome or assertion"

@@ -1,0 +1,22 @@
+# ==============================================================================
+# DDLC Meta-Agent — Coordinator Safety Valves & Loop Limits
+# Enforced deterministically by Coordinator routing edges.
+# ==============================================================================
+
+loops:
+  max_clarification_rounds: 5
+  max_architecture_revisions: 5
+  max_impl_doc_revisions: 5
+  max_build_fix_attempts: 3
+
+timeouts:
+  node_execution_seconds: 180
+  llm_call_seconds: 90
+  global_run_seconds: 1800
+  rag_rerank_ms: 150
+
+gates:
+  require_clarification_gate: true
+  require_architecture_approval: true
+  require_impl_doc_approval: true
+  require_destructive_schema_approval: true

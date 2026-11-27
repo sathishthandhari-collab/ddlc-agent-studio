@@ -1,0 +1,63 @@
+# ============================================================
+# agent.yaml — Agent Manifest Template (Blank)
+# ============================================================
+# The top-level identity and architecture declaration for a DDLC agent.
+# The Builder reads this file first to determine the generation strategy.
+# ============================================================
+
+agent:
+  name: "agent_unique_identifier"              # [REQUIRED] Snake_case identifier (e.g., telemetry_anomaly_detector)
+  display_name: "Human Readable Name"          # [REQUIRED] Display title in UI & catalog
+  version: "1.0.0"                             # [REQUIRED] Semantic version
+  description: >                               # [REQUIRED] Clear statement of agent business purpose and scope
+    High-level description of what this agent does.
+  owner: "team_or_individual_owner"            # [REQUIRED] Owning engineering or business group
+  tags:                                        # [OPTIONAL] Metadata catalog tags
+    - "domain_tag"
+
+architecture:
+  pattern: "stateful_pipeline_with_gates"      # [REQUIRED] Pattern: stateful_pipeline_with_gates | react_tool_agent | multi_step_planner_agent | lightweight_event_cli_agent | multi_source_lineage_inspector
+  runtime: "langgraph"                         # [REQUIRED] Runtime: langgraph | python_litellm
+  autonomy_level: "semi_autonomous"            # [REQUIRED] Autonomy: autonomous | semi_autonomous | human_required
+
+pipeline:
+  stages:                                      # [REQUIRED] Ordered stage topology
+    - stage_id: "stage_1_id"                   # References stages/stage_<id>.yaml
+      next: "stage_2_id"                       # Simple unconditional transition
+    - stage_id: "stage_2_id"
+      next: "stage_3_id"
+      on_error: "stage_1_id"                   # Self-correction reflection edge
+    - stage_id: "stage_3_id"
+      transitions:                             # Multi-way conditional routing (e.g., human gates, decision branches)
+        on_approved: "stage_4_id"
+        on_revise: "stage_2_id"
+        on_abort: null                         # Terminal transition (END)
+    - stage_id: "stage_4_id"
+      next: null                               # Terminal stage
+
+dependencies:
+  tools:                                       # [OPTIONAL] External tools and libraries
+    - name: "tool_name"
+      version: ">=1.0.0"
+      used_by: ["stage_1_id"]
+      description: "Purpose of tool"
+  shared_components:                           # [OPTIONAL] Reusable Tier 2 components
+    - component_id: "shared_component_id"       # References component_registry in Tier 2 metadata
+      version: "1.0.0"
+      used_by: ["stage_1_id"]
+      usage_type: "import"                     # import | extend | wrap
+      description: "Component capability"
+
+metadata:                                      # [OPTIONAL] Metadata framework tier declarations
+  tier_3_schema: "ddlc_agent_metadata"         # Auto-provisioned by DCM Schema Engine
+  tier_3_tables:
+    - "agent_specific_table"
+  writes_to:
+    tier_1: [agent_run_header, execution_log, artifact_registry, decision_log]
+    tier_2: [agent_registry, component_registry, contract_lineage]
+
+schedule:                                      # [OPTIONAL] Invocation cadence
+  type: "on_demand"                            # on_demand | cron | event_driven
+  schedule: null                               # Cron expression if type is cron
+  timezone: "UTC"
+  description: "Trigger mechanism"

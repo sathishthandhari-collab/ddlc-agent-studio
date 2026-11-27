@@ -1,0 +1,48 @@
+# ==============================================================================
+# DDLC Meta-Agent — Model Tier Assignments (LiteLLM)
+# Switch models here without modifying specialist or coordinator code.
+# ==============================================================================
+
+tiers:
+  heavy:
+    description: "Heavy reasoning: gap detection, architecture design, change impact"
+    model: "gemini/gemini-2.5-pro"
+    temperature: 0.1
+    max_tokens: 8192
+
+  standard:
+    description: "Standard generation: feasibility research, impl docs, leaf code"
+    model: "anthropic/claude-3-5-sonnet-20241022"
+    temperature: 0.1
+    max_tokens: 8192
+
+  fast:
+    description: "Mechanical checks, formatting, validation summaries"
+    model: "anthropic/claude-3-5-haiku-20241022"
+    temperature: 0.0
+    max_tokens: 4096
+
+  embedding:
+    description: "Vector embedding model for RAG and component_registry"
+    model: "text-embedding-3-small"
+    dimensions: 1536
+
+specialists:
+  spec_analyst:
+    tier: "heavy"
+    max_retries: 2
+  researcher:
+    tier: "standard"
+    max_retries: 2
+  architect:
+    tier: "heavy"
+    max_retries: 2
+  documentarian:
+    tier: "standard"
+    max_retries: 2
+  builder_leaf_coder:
+    tier: "standard"
+    max_retries: 2
+  validator:
+    tier: "fast"
+    max_retries: 1
