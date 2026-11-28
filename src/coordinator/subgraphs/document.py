@@ -201,10 +201,15 @@ def build_document_subgraph(deps: Optional[CoordinatorDeps] = None) -> Any:
 
     def node_escalate_impl_docs(state: BlackboardState) -> dict[str, Any]:
         rev_count = int(state.get("impl_doc_revision_count", 0))
-        msg = (
-            f"Safety valve triggered: impl doc revisions ({rev_count}) exceeded "
-            f"max_impl_doc_revisions ({valves.loops.max_impl_doc_revisions})."
-        )
+        if state.get("impl_doc_decision") == "escalate" and state.get("escalation_reason"):
+            msg = str(state["escalation_reason"])
+            action = "impl_doc_manual_escalate"
+        else:
+            msg = (
+                f"Safety valve triggered: impl doc revisions ({rev_count}) exceeded "
+                f"max_impl_doc_revisions ({valves.loops.max_impl_doc_revisions})."
+            )
+            action = "impl_doc_safety_valve"
         return {
             "current_phase": "failed",
             "impl_docs_approved": False,
@@ -215,7 +220,7 @@ def build_document_subgraph(deps: Optional[CoordinatorDeps] = None) -> Any:
                 BuildLogEntry(
                     phase="document",
                     actor="coordinator",
-                    action="impl_doc_safety_valve",
+                    action=action,
                     status="failed",
                     details={
                         "impl_doc_revision_count": rev_count,

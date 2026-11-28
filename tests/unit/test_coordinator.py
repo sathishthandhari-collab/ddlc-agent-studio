@@ -560,7 +560,7 @@ class _FakeSpecAnalyst:
             )
             return {
                 "current_phase": "understand",
-                "spec_validation_status": "needs_clarification",
+                "spec_validation_status": "clarify",
                 "has_open_gaps": True,
                 "clarification_rounds": [rnd],
                 "clarification_round_count": current_round,
@@ -569,7 +569,7 @@ class _FakeSpecAnalyst:
             }
         return {
             "current_phase": "understand",
-            "spec_validation_status": "valid",
+            "spec_validation_status": "accepted",
             "has_open_gaps": False,
             "parsed_spec": parsed,
             "parsed_spec_summary": summary,
@@ -601,13 +601,13 @@ class _FakeSpecAnalyst:
         if last_num < self.rounds_needed:
             return {
                 "current_phase": "understand",
-                "spec_validation_status": "needs_clarification",
+                "spec_validation_status": "clarify",
                 "has_open_gaps": True,
                 "clarification_rounds": [resolved_round],
             }
         return {
             "current_phase": "understand",
-            "spec_validation_status": "valid",
+            "spec_validation_status": "accepted",
             "has_open_gaps": False,
             "clarification_rounds": [resolved_round],
             "enriched_requirements": [
@@ -634,7 +634,7 @@ class _FakeSpecAnalyst:
         return {
             "current_phase": "understand",
             "target_agent_name": self.agent_name,
-            "spec_validation_status": "valid",
+            "spec_validation_status": "accepted",
             "has_open_gaps": False,
             "parsed_spec_summary": summary,
             "change_request": ChangeRequestContext(
@@ -1145,7 +1145,7 @@ def test_understand_subgraph_multi_round_and_abort(tmp_path: Path) -> None:
         config=cfg,
     )
     assert "__interrupt__" not in out3
-    assert out3["spec_validation_status"] == "valid"
+    assert out3["spec_validation_status"] == "accepted"
     assert len(out3["enriched_requirements"]) >= 1
 
     cfg_abort = make_thread_config("u-abort-1")
@@ -1721,3 +1721,202 @@ def test_coordinator_full_day2_change_flow_preserves_custom_code_and_commits_new
     )
     assert "# HOTFIX-2AM: keep timeout guard" in delivered_handler
     assert fake_builder.last_mode == "patch"
+
+
+# ===========================================================================
+# Section E: Regression Tests for Verification Findings & Coverage Gaps
+# ===========================================================================
+
+
+def test_manual_gate2_and_gate3_escalate_preserves_reason(tmp_path: Path) -> None:
+    """Manual Gate 2/3 'escalate' keeps the user feedback instead of safety-valve boilerplate."""
+    g_design = _wrap_subgraph(
+        "d",
+        build_design_subgraph(
+            CoordinatorDeps(
+                architect=_FakeArchitect(),  # type: ignore[arg-type]
+                safety_valves=_valves(max_architecture_revisions=5),
+                workspace_root=tmp_path,
+            )
+        ),
+    )
+    design_state = {
+        **initial_blackboard_state(raw_spec_yaml=_canonical_spec_yaml()),
+        "spec_validation_status": "accepted",
+        "parsed_spec_summary": ParsedSpecSummary(agent_name="sql_guard_agent", agent_version="1.0.0"),
+        "feasibility_verdict": "feasible",
+        "research_findings": _sample_research(),
+    }
+    cfg_d = make_thread_config("manual-esc-d")
+    g_design.invoke(design_state, config=cfg_d)
+    d_out = g_design.invoke(
+        make_resume_command({"decision": "escalate", "feedback": "Need security team review."}),
+        config=cfg_d,
+    )
+    assert d_out["escalation_required"] is True
+    assert d_out["escalation_reason"] == "Need security team review."
+
+    g_doc = _wrap_subgraph(
+        "doc",
+        build_document_subgraph(
+            CoordinatorDeps(
+                documentarian=_FakeDocumentarian(tmp_path / "staging_impl_docs"),  # type: ignore[arg-type]
+                safety_valves=_valves(max_impl_doc_revisions=5),
+                workspace_root=tmp_path,
+                staging_root=tmp_path / "staging_impl_docs",
+            )
+        ),
+    )
+    doc_state = {
+        **design_state,
+        "architecture_approved": True,
+        "approved_architecture_version": 1,
+        "architecture_revisions": [_sample_arch(approved=True)],
+    }
+    cfg_doc = make_thread_config("manual-esc-doc")
+    g_doc.invoke(doc_state, config=cfg_doc)
+    doc_out = g_doc.invoke(
+        make_resume_command({"decision": "escalate", "feedback": "Escalate contract ownership."}),
+        config=cfg_doc,
+    )
+    assert doc_out["escalation_required"] is True
+    assert doc_out["escalation_reason"] == "Escalate contract ownership."
+
+
+def test_feasibility_gate_revise_records_guidance_requirement(tmp_path: Path) -> None:
+    """Gate 'feasibility_escalation' captures both 'guidance' and 'feedback' into enriched_requirements."""
+    base_state = {
+        **initial_blackboard_state(raw_spec_yaml=_canonical_spec_yaml()),
+        "spec_validation_status": "accepted",
+        "parsed_spec": yaml.safe_load(_canonical_spec_yaml()),
+        "parsed_spec_summary": ParsedSpecSummary(agent_name="sql_guard_agent", agent_version="1.0.0"),
+    }
+    g_rev = _wrap_subgraph(
+        "r",
+        build_research_subgraph(
+            CoordinatorDeps(
+                researcher=_FakeResearcher(verdicts=["not_feasible", "feasible"]),  # type: ignore[arg-type]
+                safety_valves=_valves(),
+                workspace_root=tmp_path,
+            )
+        ),
+    )
+    cfg = make_thread_config("r-guidance")
+    g_rev.invoke(base_state, config=cfg)
+    out = g_rev.invoke(
+        make_resume_command({"decision": "revise", "guidance": "Use sqlglot fallback parser"}),
+        config=cfg,
+    )
+    assert out["feasibility_verdict"] == "feasible"
+    summaries = [req.summary for req in out["enriched_requirements"]]
+    assert "Use sqlglot fallback parser" in summaries
+
+
+def test_top_level_construct_documentarian_reroute_bounded_and_halt(tmp_path: Path) -> None:
+    """Persistent documentarian validation failures increment build_fix_attempt_count and trip Gate 4."""
+    agent_name = "reroute_guard_agent"
+    doc_issue = ValidationIssue(
+        check_name="contract_consistency",
+        severity="error",
+        file_path="impl_docs/contracts/sql_payload.yaml",
+        route_target="documentarian",
+        message="Persistent impl_docs mismatch",
+    )
+    valves = _valves(
+        max_build_fix_attempts=2,
+        require_clarification_gate=False,
+        require_architecture_approval=False,
+        require_impl_doc_approval=False,
+    )
+    deps = CoordinatorDeps(
+        spec_analyst=_FakeSpecAnalyst(rounds_needed=0, agent_name=agent_name),  # type: ignore[arg-type]
+        researcher=_FakeResearcher(verdicts=["feasible"]),  # type: ignore[arg-type]
+        architect=_FakeArchitect(agent_name=agent_name),  # type: ignore[arg-type]
+        documentarian=_FakeDocumentarian(tmp_path / "staging_impl_docs", agent_name=agent_name),  # type: ignore[arg-type]
+        builder=_FakeBuilder(tmp_path / "build_staging", agent_name=agent_name),  # type: ignore[arg-type]
+        validator=_FakeValidator(sequence=[(False, [doc_issue])]),  # type: ignore[arg-type]
+        safety_valves=valves,
+        catalog_client=_FakeCatalogClient(),  # type: ignore[arg-type]
+        lineage_client=_FakeLineageClient(),  # type: ignore[arg-type]
+        rag_store=_FakeRAGStore(),  # type: ignore[arg-type]
+        embedder=_FakeEmbedder(),  # type: ignore[arg-type]
+        workspace_root=tmp_path,
+        agents_output_dir=tmp_path / "agents",
+        knowledge_dir=tmp_path / "knowledge",
+        staging_root=tmp_path / "staging_impl_docs",
+        enable_tier3_migration=False,
+    )
+    graph = compile_coordinator_graph(deps=deps, checkpointer=create_memory_checkpointer())
+    cfg = make_thread_config("reroute-bounded")
+
+    # Loops construct -> document twice, then trips Gate 4 escalation on 3rd failure instead of infinite recursion
+    r1 = graph.invoke(initial_blackboard_state(raw_spec_yaml=_canonical_spec_yaml(agent_name)), config=cfg)
+    assert "__interrupt__" in r1
+    assert r1["__interrupt__"][0].value["gate"] == "build_escalation"
+    assert r1["build_fix_attempt_count"] == 2
+
+    # Abort at Gate 4 -> top-level halt finalizes cleanly
+    r2 = graph.invoke(make_resume_command({"decision": "abort", "feedback": "Stop reroute"}), config=cfg)
+    assert "__interrupt__" not in r2
+    assert r2["current_phase"] == "aborted"
+    assert r2["last_error"] is not None
+
+
+def test_delivery_tier3_migration_and_new_component_embedding(tmp_path: Path) -> None:
+    """Phase 8 invokes Tier3SchemaClient when tier3_contract_yaml is set and embeds new components."""
+    state = _ready_delivery_state(tmp_path, agent_name="tier3_agent")
+    latest_pkg = state["impl_doc_revisions"][0].package.model_copy(
+        update={
+            "tier3_contract_yaml": {
+                "schema": "ddlc_tier3_agent_metadata",
+                "tables": [{"name": "audit_events", "columns": [{"name": "id", "type": "uuid"}]}],
+            }
+        }
+    )
+    arch = state["architecture_revisions"][0].model_copy(
+        update={
+            "new_components_to_create": [
+                {
+                    "component_name": "sql_ast_normalizer",
+                    "component_version": "1.0.0",
+                    "description": "Canonical SQL AST normalizer helper",
+                    "component_type": "utility",
+                }
+            ]
+        }
+    )
+    enriched_state: BlackboardState = {
+        **state,
+        "architecture_revisions": [arch],
+        "impl_doc_revisions": [ImplDocRevision(revision_number=1, package=latest_pkg, approved=True)],
+    }
+
+    applied_calls: list[dict[str, Any]] = []
+
+    class _FakeTier3Client:
+        def apply_migration(self, contract_path: Path, **kwargs: Any) -> None:
+            applied_calls.append({"path": contract_path, **kwargs})
+
+    catalog = _FakeCatalogClient()
+    rag = _FakeRAGStore()
+    embedder = _FakeEmbedder()
+    deps = CoordinatorDeps(
+        workspace_root=tmp_path,
+        agents_output_dir=tmp_path / "agents",
+        knowledge_dir=tmp_path / "knowledge",
+        catalog_client=catalog,  # type: ignore[arg-type]
+        lineage_client=_FakeLineageClient(),  # type: ignore[arg-type]
+        rag_store=rag,  # type: ignore[arg-type]
+        embedder=embedder,  # type: ignore[arg-type]
+        tier3_client=_FakeTier3Client(),  # type: ignore[arg-type]
+        enable_tier3_migration=True,
+        strict_delivery=True,
+    )
+    out = node_delivery(enriched_state, deps=deps)
+    assert out["current_phase"] == "completed"
+    assert len(applied_calls) == 1
+    assert applied_calls[0]["path"].exists()
+    assert len(catalog.components) == 1
+    assert catalog.components[0]["component_name"] == "sql_ast_normalizer"
+    assert len(catalog.components[0]["embedding"]) == 1536
+

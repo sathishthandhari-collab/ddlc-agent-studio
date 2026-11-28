@@ -108,10 +108,12 @@ def build_construct_subgraph(deps: Optional[CoordinatorDeps] = None) -> Any:
         }
 
     def node_prepare_documentarian_fix(state: BlackboardState) -> dict[str, Any]:
+        next_attempt = int(state.get("build_fix_attempt_count", 0)) + 1
         instructions = list(state.get("active_fix_instructions") or [])
         feedback = "; ".join(instructions) if instructions else "Validation flagged impl_docs integrity errors."
         return {
             "current_phase": "document",
+            "build_fix_attempt_count": next_attempt,
             "impl_docs_approved": False,
             "impl_doc_decision": "revise",
             "impl_doc_feedback": feedback,
@@ -121,7 +123,7 @@ def build_construct_subgraph(deps: Optional[CoordinatorDeps] = None) -> Any:
                     actor="coordinator",
                     action="route_to_documentarian",
                     status="completed",
-                    details={"feedback": feedback},
+                    details={"attempt_number": next_attempt, "feedback": feedback},
                 )
             ],
         }
@@ -272,12 +274,6 @@ def build_construct_subgraph(deps: Optional[CoordinatorDeps] = None) -> Any:
         },
     )
     return workflow.compile()
-
-
-def _export_delivery_symbols() -> tuple[Any, Any, Any]:
-    from src.coordinator.delivery import DeliveryError, anode_delivery, node_delivery
-
-    return DeliveryError, anode_delivery, node_delivery
 
 
 def __getattr__(name: str) -> Any:

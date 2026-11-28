@@ -1,0 +1,443 @@
+# ============================================================================
+# dbt Pipeline Builder Agent — Canonical Day-0 Agent Specification
+# Reference specification from design-docs/meta-agent/input-spec-template/spec_template.md §4
+# ============================================================================
+
+agent:
+  name: "dbt_pipeline_builder_agent"
+  version: "1.0.0"
+  description: >
+    Inspects source database schemas, reasons over transformation requirements,
+    generates modular dbt SQL models with YAML documentation and schema tests,
+    dry-runs and validates compilation in an isolated development sandbox,
+    presents generated artifacts for human review, and delivers the approved
+    pipeline directly as a Git Pull Request. Runs on demand or via CI/CD events.
+  owner: "analytics-engineering-team"
+  domain: "analytics"
+  tags: ["dbt", "code_generation", "analytics_engineering", "gitops", "llm"]
+
+architecture:
+  autonomy_level: "semi_autonomous"
+  complexity: "complex"
+  runtime_preference: "langgraph"
+  description: >
+    Stateful LangGraph agent structured with explicit reflection loops and a human
+    review gate. Stage 1 introspects source catalog tables; Stage 2 reasons over
+    business requirements to build an AST model plan; Stage 3 synthesizes dbt SQL
+    and YAML; Stage 4 executes sandbox compilation and linting, looping back to Stage 3
+    on syntax or model errors (max 3 retries); Stage 5 halts unconditionally for human
+    approval; Stage 6 commits code to a Git branch and opens a Pull Request.
+
+stages:
+  - id: "discover"
+    type: "discovery"
+    description: >
+      Connects to source database information schemas and data catalogs to discover
+      tables, column names, data types, primary keys, and foreign key relationships.
+      Produces a structured source schema profile for downstream reasoning.
+    autonomy: "autonomous"
+    input_contract: "source_database_reference"
+    output_contract: "source_schema_profile"
+    tools: ["inspect_information_schema", "query_catalog_lineage"]
+    error_strategy: "retry"
+    retry_config:
+      max_retries: 3
+      backoff_seconds: 30
+    description_details: >
+      Target databases: PostgreSQL OLTP schemas (public, sales, inventory).
+      Extract column comments, nullability constraints, and relational cardinalities.
+      Handle connection timeouts gracefully with exponential backoff.
+
+  - id: "plan"
+    type: "reasoning"
+    description: >
+      Analyzes the source schema profile alongside business transformation goals.
+      Formulates a multi-layer dbt modeling DAG (staging, intermediate, marts)
+      specifying model names, materialization strategies, and join dependencies.
+    autonomy: "autonomous"
+    input_contract: "source_schema_profile"
+    output_contract: "transformation_plan"
+    tools: ["query_tier2_contracts", "sqlglot_analyze_lineage"]
+    error_strategy: "reflect"
+    retry_config:
+      max_retries: 2
+      backoff_seconds: 10
+    description_details: >
+      Model tiers must strictly adhere to the analytics engineering style guide:
+      stg_ (views), int_ (ephemeral or tables), fct_ / dim_ (tables or incremental).
+      Identifies primary key uniqueness tests and relationship tests for each model.
+
+  - id: "generate"
+    type: "code_generation"
+    description: >
+      Synthesizes dbt Jinja-SQL model files and companion YAML schema files
+      (containing column descriptions, sources, and dbt generic tests)
+      based on the approved transformation plan.
+    autonomy: "autonomous"
+    input_contract: "transformation_plan"
+    output_contract: "dbt_artifact_bundle"
+    tools: ["render_jinja_template", "sqlglot_format_sql"]
+    error_strategy: "reflect"
+    retry_config:
+      max_retries: 3
+      backoff_seconds: 5
+    description_details: >
+      Generates models/staging, models/marts, and models/schema.yml.
+      Enforces SQLGlot dialect safety (e.g. Snowflake or DuckDB).
+      Bundles all generated files into a Claim Check bundle URI.
+
+  - id: "dry_run"
+    type: "sandbox_testing"
+    description: >
+      Executes dbt compile and dbt test against an isolated sandbox environment
+      (or DuckDB runner) to verify SQL syntax, macro resolution, and DAG validity.
+      On syntax or compilation error, feeds diagnostic tracebacks back to Stage 3.
+    autonomy: "autonomous"
+    input_contract: "dbt_artifact_bundle"
+    output_contract: "compilation_report"
+    tools: ["run_dbt_compile", "run_sqlglot_validate"]
+    error_strategy: "reflect"
+    retry_config:
+      max_retries: 3
+      backoff_seconds: 15
+    description_details: >
+      Executes in an ephemeral sandbox. Captures compiler stdout, stderr, and SQLGlot
+      AST parse diagnostics. If dbt compile exits non-zero, reflects back to
+      generate with the exact failing model path and compiler error.
+
+  - id: "review"
+    type: "human_review"
+    description: >
+      Pauses execution at an explicit human-in-the-loop gate. Presents the generated
+      dbt models, YAML documentation, and sandbox compilation report to an analytics
+      engineer for visual inspection and sign-off.
+    autonomy: "human_required"
+    input_contract: "compilation_report"
+    output_contract: "reviewed_artifact_bundle"
+    tools: ["render_diff_summary"]
+    error_strategy: "escalate"
+    description_details: >
+      Invokes LangGraph interrupt() to serialize state to the PostgreSQL checkpoint table.
+      Surfaces git diffs and lineage diagrams in Chainlit or Web UI. Resumes on human approval.
+
+  - id: "deliver"
+    type: "delivery"
+    description: >
+      Creates a new Git branch, commits all validated dbt models and schema YAML files,
+      pushes the branch to the remote repository, and opens a Pull Request with a
+      comprehensive markdown summary of models, tests, and lineage.
+    autonomy: "autonomous"
+    input_contract: "reviewed_artifact_bundle"
+    output_contract: "delivery_manifest"
+    tools: ["create_git_branch", "commit_files", "open_pull_request"]
+    error_strategy: "fail_fast"
+    retry_config:
+      max_retries: 2
+      backoff_seconds: 20
+    description_details: >
+      Branch naming pattern: feat/dbt-models-{run_id}.
+      PR body includes transformation summary, source references, and test checklist.
+
+contracts:
+  - id: "source_database_reference"
+    description: >
+      Initial input parameters specifying target source databases, schemas,
+      and connection references for catalog introspection.
+    direction: "input"
+    fields:
+      - name: "database_name"
+        type: "string"
+        description: "Name of the source database catalog (e.g., 'production_oltp')"
+        quality_rules: ["must not be empty"]
+      - name: "schema_names"
+        type: "array"
+        description: "List of database schema names to introspect"
+        quality_rules: ["must contain at least one schema"]
+      - name: "connection_ref"
+        type: "string"
+        description: "Configuration reference key for database credentials in secrets store"
+        quality_rules: ["must start with secret:// or config://"]
+
+  - id: "source_schema_profile"
+    description: >
+      Introspected catalog metadata describing tables, columns, data types,
+      keys, and constraints discovered across source schemas.
+    direction: "internal"
+    fields:
+      - name: "database_name"
+        type: "string"
+        description: "Source database catalog name"
+        quality_rules: ["must not be empty"]
+      - name: "tables"
+        type: "array"
+        description: "List of discovered tables with column definitions and primary keys"
+        items:
+          type: "object"
+          model_name: "TableProfile"
+          fields:
+            - name: "table_name"
+              type: "string"
+              description: "Source table identifier"
+            - name: "schema_name"
+              type: "string"
+              description: "Schema namespace"
+            - name: "columns"
+              type: "array"
+              description: "List of column definitions"
+              items:
+                type: "object"
+                model_name: "ColumnProfile"
+                fields:
+                  - name: "name"
+                    type: "string"
+                    description: "Column name"
+                  - name: "data_type"
+                    type: "string"
+                    description: "SQL data type"
+                  - name: "primary_key"
+                    type: "boolean"
+                    description: "Whether column is part of primary key"
+        quality_rules: ["must contain at least one table definition"]
+      - name: "foreign_keys"
+        type: "array"
+        description: "Inferred and declared relational foreign keys across tables"
+      - name: "profiled_at"
+        type: "timestamp"
+        description: "UTC timestamp when the database inspection completed"
+
+  - id: "transformation_plan"
+    description: >
+      Structured architectural plan generated by the LLM reasoning stage outlining
+      the DAG of dbt models to build, join strategies, and test definitions.
+    direction: "internal"
+    fields:
+      - name: "project_name"
+        type: "string"
+        description: "Target dbt project identifier"
+        quality_rules: ["must not be empty"]
+      - name: "target_dialect"
+        type: "string"
+        description: "SQL dialect for the models (e.g. snowflake, postgres, duckdb)"
+        quality_rules: ["must be a supported SQLGlot dialect"]
+      - name: "staging_models"
+        type: "array"
+        description: "List of staging models mapping source tables with 1:1 clean views"
+        items:
+          type: "object"
+          model_name: "StagingModelSpec"
+          fields:
+            - name: "model_name"
+              type: "string"
+              description: "Staging model identifier (e.g., stg_customers)"
+            - name: "source_table"
+              type: "string"
+              description: "Source table identifier"
+            - name: "columns"
+              type: "array"
+              items:
+                type: "string"
+              description: "Projected column list"
+      - name: "marts_models"
+        type: "array"
+        description: "List of dimensional/fact mart models joining staging sources"
+        items:
+          type: "object"
+          model_name: "MartModelSpec"
+          fields:
+            - name: "model_name"
+              type: "string"
+              description: "Mart model identifier (e.g., fct_orders)"
+            - name: "materialization"
+              type: "string"
+              default: "table"
+              description: "dbt materialization strategy (table, view, incremental)"
+            - name: "description"
+              type: "string"
+              description: "Business documentation for the mart model"
+            - name: "staging_dependencies"
+              type: "array"
+              items:
+                type: "string"
+              description: "Upstream staging models referenced"
+      - name: "total_models_planned"
+        type: "integer"
+        description: "Count of models planned for synthesis"
+        quality_rules: ["must be between 1 and 100"]
+
+  - id: "dbt_artifact_bundle"
+    description: >
+      Claim Check reference pointing to the bundle of synthesized dbt SQL models,
+      macros, and schema.yml specification files written to staging disk.
+    direction: "internal"
+    storage_mode: "claim_check"
+    fields:
+      - name: "bundle_id"
+        type: "string"
+        description: "Unique UUID for the artifact bundle"
+        quality_rules: ["must be a valid UUIDv4"]
+      - name: "storage_uri"
+        type: "string"
+        description: "File or object storage URI pointing to the artifact archive"
+        quality_rules: ["must be a valid file:// or s3:// URI"]
+      - name: "file_manifest"
+        type: "array"
+        description: "List of relative file paths contained in the generated bundle"
+        quality_rules: ["must contain at least one .sql model and one .yml schema"]
+      - name: "artifact_sha256"
+        type: "string"
+        description: "Cryptographic hash of the bundle archive for tamper-proof verification"
+        quality_rules: ["must match regex ^[a-f0-9]{64}$"]
+
+  - id: "compilation_report"
+    description: >
+      Execution diagnostics from the sandbox compilation and validation run,
+      including dbt compile stdout, linting status, and error traces.
+    direction: "internal"
+    fields:
+      - name: "bundle_id"
+        type: "string"
+        description: "Reference to the dbt_artifact_bundle evaluated"
+      - name: "success"
+        type: "boolean"
+        description: "True if all models compiled cleanly with zero syntax or test errors"
+      - name: "compilation_errors"
+        type: "array"
+        description: "List of compiler or parser errors encountered, if any"
+      - name: "sandbox_runtime_seconds"
+        type: "float"
+        description: "Duration of sandbox execution in seconds"
+
+  - id: "reviewed_artifact_bundle"
+    description: >
+      Signed-off artifact bundle post-human review gate, containing human approval
+      metadata and any reviewer feedback.
+    direction: "internal"
+    fields:
+      - name: "bundle_id"
+        type: "string"
+        description: "Reference to the approved dbt_artifact_bundle"
+      - name: "approved_by"
+        type: "string"
+        description: "User ID or email of the approving engineer"
+        quality_rules: ["must not be empty"]
+      - name: "approval_timestamp"
+        type: "timestamp"
+        description: "UTC timestamp when human approval was granted"
+
+  - id: "delivery_manifest"
+    description: >
+      Output manifest documenting the delivered Git repository branch, commit SHA,
+      and opened Pull Request URL.
+    direction: "output"
+    fields:
+      - name: "manifest_id"
+        type: "string"
+        description: "Unique UUID identifying this delivery manifest"
+      - name: "run_id"
+        type: "string"
+        description: "Run ID that generated this delivery"
+      - name: "repository"
+        type: "string"
+        description: "Git repository slug (e.g. 'org/analytics-dbt-repo')"
+        quality_rules: ["must match regex ^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$"]
+      - name: "branch_name"
+        type: "string"
+        description: "Git branch where artifacts were committed"
+        quality_rules: ["must start with feat/"]
+      - name: "commit_sha"
+        type: "string"
+        description: "Git commit hash of the committed files"
+        quality_rules: ["must match regex ^[a-f0-9]{40}$"]
+      - name: "pull_request_url"
+        type: "string"
+        description: "URL of the created Pull Request"
+        quality_rules: ["must be a valid URL"]
+      - name: "artifact_sha256"
+        type: "string"
+        description: "Cryptographic SHA-256 hash of the delivered bundle"
+        quality_rules: ["must match regex ^[a-f0-9]{64}$"]
+      - name: "delivered_at"
+        type: "timestamp"
+        description: "UTC timestamp when the delivery was finalized"
+
+governance:
+  approval_gates: ["review"]
+  audit_requirements:
+    enabled: true
+    log_level: "comprehensive"
+    retention_days: 365
+  compliance_rules:
+    - "All generated SQL must conform to company analytics engineering naming conventions"
+    - "No hardcoded credentials or plaintext secrets in dbt profiles or connection strings"
+    - "Every staging and marts model must include at least one unique test and one not_null test"
+    - "Side-effecting Git delivery operations require unconditional human-in-the-loop review"
+  data_classification: "internal"
+  description: >
+    Agent-generated code and Pull Requests are subject to GitOps peer review.
+    All LLM prompt/completion spans, tool invocations, and human approval timestamps
+    are recorded in the Tier 1 metadata operational telemetry database.
+
+infrastructure:
+  sources:
+    - name: "production_oltp_postgres"
+      system: "postgres"
+      connection: "config://databases.postgres_oltp"
+      format: "database_table"
+      description: >
+        Read-only replica of the transactional OLTP database for catalog
+        introspection and information_schema queries.
+  destinations:
+    - name: "analytics_git_repo"
+      system: "git_repo"
+      connection: "config://git.target_repo_uri"
+      format: "git_repo"
+      description: >
+        Enterprise GitHub / GitLab repository housing the dbt analytics engineering project.
+  scheduling:
+    type: "on_demand"
+    description: >
+      Invoked on demand by analytics engineers via CLI, Slack, or webhook trigger
+      when onboarding new source tables or refactoring data models.
+  resource_constraints:
+    max_memory_gb: 4.0
+    max_cpu_cores: 2
+    max_execution_minutes: 15
+    description: >
+      Lightweight compute requirements. Code generation and LLM reasoning run via
+      LiteLLM API calls. Sandbox compilation runs in isolated local DuckDB memory.
+
+cross_agent:
+  upstream_dependencies: []
+  downstream_consumers:
+    - agent: "dbt_ci_test_runner"
+      contract: "delivery_manifest"
+      description: "CI pipeline that triggers integration tests on opened Pull Requests"
+  shared_components:
+    - name: "metadata_telemetry_callback"
+      version: "1.0.0"
+      usage: "Tier 1 agent run logging and prompt token telemetry"
+    - name: "git_deliverer_v1"
+      version: "2.1.0"
+      usage: "Shared GitHub/GitLab PR automation wrapper"
+  description: >
+    This agent serves as the front-door builder for the analytics data platform.
+    It synthesizes verified dbt code that downstream CI and transformation runners execute.
+
+constraints:
+  required_libraries:
+    - "litellm"
+    - "instructor"
+    - "sqlglot"
+    - "dbt-core"
+  avoided_libraries:
+    - "pyspark"
+    - "langchain_community"
+  performance:
+    max_latency_seconds: 600
+  sla:
+    availability_percent: 99.0
+    max_downtime_minutes: 60
+    recovery_time_minutes: 15
+  description: >
+    The agent must run idempotently. Repeated runs on the same source schema must produce
+    deterministic model naming and identical AST structures for stable git diffs.

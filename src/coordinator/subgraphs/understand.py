@@ -64,6 +64,8 @@ def build_understand_subgraph(deps: Optional[CoordinatorDeps] = None) -> Any:
 
     def node_gate_clarification(state: BlackboardState) -> dict[str, Any]:
         rounds = state.get("clarification_rounds") or []
+        if not rounds:
+            raise RuntimeError("Gate 1 Clarification reached without any ClarificationRound.")
         latest_round = (
             rounds[-1]
             if isinstance(rounds[-1], ClarificationRound)

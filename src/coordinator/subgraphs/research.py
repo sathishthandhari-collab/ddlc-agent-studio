@@ -54,7 +54,7 @@ def build_research_subgraph(deps: Optional[CoordinatorDeps] = None) -> Any:
 
         if isinstance(payload, Mapping):
             decision = str(payload.get("decision", "abort")).strip().lower()
-            feedback = payload.get("feedback")
+            feedback = payload.get("feedback") or payload.get("guidance")
         else:
             decision = "abort"
             feedback = None

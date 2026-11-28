@@ -150,10 +150,15 @@ def build_design_subgraph(deps: Optional[CoordinatorDeps] = None) -> Any:
 
     def node_escalate_architecture(state: BlackboardState) -> dict[str, Any]:
         rev_count = int(state.get("architecture_revision_count", 0))
-        msg = (
-            f"Safety valve triggered: architecture revisions ({rev_count}) exceeded "
-            f"max_architecture_revisions ({valves.loops.max_architecture_revisions})."
-        )
+        if state.get("architecture_decision") == "escalate" and state.get("escalation_reason"):
+            msg = str(state["escalation_reason"])
+            action = "architecture_manual_escalate"
+        else:
+            msg = (
+                f"Safety valve triggered: architecture revisions ({rev_count}) exceeded "
+                f"max_architecture_revisions ({valves.loops.max_architecture_revisions})."
+            )
+            action = "architecture_safety_valve"
         return {
             "current_phase": "failed",
             "architecture_approved": False,
@@ -164,7 +169,7 @@ def build_design_subgraph(deps: Optional[CoordinatorDeps] = None) -> Any:
                 BuildLogEntry(
                     phase="design",
                     actor="coordinator",
-                    action="architecture_safety_valve",
+                    action=action,
                     status="failed",
                     details={
                         "architecture_revision_count": rev_count,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import re
@@ -599,91 +600,75 @@ def _execute_atomic_postgres_commit(
             dep_tbl = tier2_table("agent_dependency")
             lin_tbl = tier2_table("contract_lineage")
             upstream, downstream = _extract_cross_agent_links(state, package)
-            for peer_id, ctr_name in upstream:
-                if peer_id == agent_id:
-                    continue
-                peer_exists = conn.execute(
-                    f"SELECT 1 FROM {agent_tbl} WHERE agent_id = %(agent_id)s",
-                    {"agent_id": peer_id},
-                ).fetchone()
-                if peer_exists is None:
-                    continue
-                local_cid = contract_ids.get(ctr_name or "")
-                conn.execute(
-                    f"""
-                    INSERT INTO {dep_tbl} (
-                        dependency_id, upstream_agent_id, downstream_agent_id,
-                        dependency_type, contract_id, status
-                    )
-                    VALUES (%(dependency_id)s, %(upstream)s, %(downstream)s, 'data', %(contract_id)s, 'active')
-                    ON CONFLICT (upstream_agent_id, downstream_agent_id, dependency_type) DO UPDATE
-                    SET contract_id = EXCLUDED.contract_id, status = 'active'
-                    """,
-                    {
-                        "dependency_id": uuid4(),
-                        "upstream": peer_id[:100],
-                        "downstream": agent_id[:100],
-                        "contract_id": local_cid,
-                    },
-                )
-                if local_cid is not None and ctr_name:
-                    prod_row = conn.execute(
-                        f"""
-                        SELECT contract_id FROM {contract_tbl}
-                        WHERE agent_id = %(agent_id)s AND contract_name = %(cname)s
-                        ORDER BY updated_at DESC LIMIT 1
-                        """,
-                        {"agent_id": peer_id, "cname": ctr_name},
+            for peer_links, peer_is_upstream in ((upstream, True), (downstream, False)):
+                for peer_id, ctr_name in peer_links:
+                    if peer_id == agent_id:
+                        continue
+                    peer_exists = conn.execute(
+                        f"SELECT 1 FROM {agent_tbl} WHERE agent_id = %(agent_id)s",
+                        {"agent_id": peer_id},
                     ).fetchone()
-                    if prod_row is not None:
-                        prod_cid = prod_row["contract_id"] if isinstance(prod_row, Mapping) else prod_row[0]
-                        if prod_cid != local_cid:
-                            conn.execute(
-                                f"""
-                                INSERT INTO {lin_tbl} (
-                                    lineage_id, producer_agent_id, producer_contract_id,
-                                    consumer_agent_id, consumer_contract_id, status
-                                )
-                                VALUES (%(lineage_id)s, %(prod_a)s, %(prod_c)s, %(cons_a)s, %(cons_c)s, 'active')
-                                ON CONFLICT (producer_contract_id, consumer_contract_id) DO UPDATE
-                                SET status = 'active'
-                                """,
-                                {
-                                    "lineage_id": uuid4(),
-                                    "prod_a": peer_id[:100],
-                                    "prod_c": prod_cid,
-                                    "cons_a": agent_id[:100],
-                                    "cons_c": local_cid,
-                                },
-                            )
-
-            for peer_id, ctr_name in downstream:
-                if peer_id == agent_id:
-                    continue
-                peer_exists = conn.execute(
-                    f"SELECT 1 FROM {agent_tbl} WHERE agent_id = %(agent_id)s",
-                    {"agent_id": peer_id},
-                ).fetchone()
-                if peer_exists is None:
-                    continue
-                local_cid = contract_ids.get(ctr_name or "")
-                conn.execute(
-                    f"""
-                    INSERT INTO {dep_tbl} (
-                        dependency_id, upstream_agent_id, downstream_agent_id,
-                        dependency_type, contract_id, status
+                    if peer_exists is None:
+                        continue
+                    local_cid = contract_ids.get(ctr_name or "")
+                    upstream_id = peer_id[:100] if peer_is_upstream else agent_id[:100]
+                    downstream_id = agent_id[:100] if peer_is_upstream else peer_id[:100]
+                    conn.execute(
+                        f"""
+                        INSERT INTO {dep_tbl} (
+                            dependency_id, upstream_agent_id, downstream_agent_id,
+                            dependency_type, contract_id, status
+                        )
+                        VALUES (%(dependency_id)s, %(upstream)s, %(downstream)s, 'data', %(contract_id)s, 'active')
+                        ON CONFLICT (upstream_agent_id, downstream_agent_id, dependency_type) DO UPDATE
+                        SET contract_id = EXCLUDED.contract_id, status = 'active'
+                        """,
+                        {
+                            "dependency_id": uuid4(),
+                            "upstream": upstream_id,
+                            "downstream": downstream_id,
+                            "contract_id": local_cid,
+                        },
                     )
-                    VALUES (%(dependency_id)s, %(upstream)s, %(downstream)s, 'data', %(contract_id)s, 'active')
-                    ON CONFLICT (upstream_agent_id, downstream_agent_id, dependency_type) DO UPDATE
-                    SET contract_id = EXCLUDED.contract_id, status = 'active'
-                    """,
-                    {
-                        "dependency_id": uuid4(),
-                        "upstream": agent_id[:100],
-                        "downstream": peer_id[:100],
-                        "contract_id": local_cid,
-                    },
-                )
+                    if local_cid is not None and ctr_name:
+                        peer_row = conn.execute(
+                            f"""
+                            SELECT contract_id FROM {contract_tbl}
+                            WHERE agent_id = %(agent_id)s AND contract_name = %(cname)s
+                            ORDER BY updated_at DESC LIMIT 1
+                            """,
+                            {"agent_id": peer_id, "cname": ctr_name},
+                        ).fetchone()
+                        if peer_row is not None:
+                            peer_cid = (
+                                peer_row["contract_id"]
+                                if isinstance(peer_row, Mapping)
+                                else peer_row[0]
+                            )
+                            if peer_cid != local_cid:
+                                prod_a, prod_c, cons_a, cons_c = (
+                                    (peer_id[:100], peer_cid, agent_id[:100], local_cid)
+                                    if peer_is_upstream
+                                    else (agent_id[:100], local_cid, peer_id[:100], peer_cid)
+                                )
+                                conn.execute(
+                                    f"""
+                                    INSERT INTO {lin_tbl} (
+                                        lineage_id, producer_agent_id, producer_contract_id,
+                                        consumer_agent_id, consumer_contract_id, status
+                                    )
+                                    VALUES (%(lineage_id)s, %(prod_a)s, %(prod_c)s, %(cons_a)s, %(cons_c)s, 'active')
+                                    ON CONFLICT (producer_contract_id, consumer_contract_id) DO UPDATE
+                                    SET status = 'active'
+                                    """,
+                                    {
+                                        "lineage_id": uuid4(),
+                                        "prod_a": prod_a,
+                                        "prod_c": prod_c,
+                                        "cons_a": cons_a,
+                                        "cons_c": cons_c,
+                                    },
+                                )
 
             # 5. Upsert build_summary
             build_tbl = tier2_table("build_summary")
@@ -724,11 +709,16 @@ def _execute_atomic_postgres_commit(
                 },
             )
 
-            # 6. Record frozen gate decisions in stage_gate_record
+            # 6. Record frozen gate decisions idempotently in stage_gate_record
             gate_tbl = tier2_table("stage_gate_record")
+            conn.execute(
+                f"DELETE FROM {gate_tbl} WHERE run_id = %(run_id)s",
+                {"run_id": run_uuid},
+            )
             for raw_gate in state.get("gate_decisions") or []:
                 gate = _coerce_model(raw_gate, GateDecisionRecord)
                 gate_status = "passed" if gate.decision == "approved" else "failed"
+                gate_type = "automated_check" if gate.reviewer == "auto_policy" else "human_approval"
                 conn.execute(
                     f"""
                     INSERT INTO {gate_tbl} (
@@ -738,7 +728,7 @@ def _execute_atomic_postgres_commit(
                     )
                     VALUES (
                         %(gate_id)s, %(run_id)s, %(agent_id)s, %(stage_id)s,
-                        'human_approval', %(gate_status)s, %(checked_by)s,
+                        %(gate_type)s, %(gate_status)s, %(checked_by)s,
                         %(payload_sha256)s, %(notes)s, %(evaluated_at)s
                     )
                     """,
@@ -747,6 +737,7 @@ def _execute_atomic_postgres_commit(
                         "run_id": run_uuid,
                         "agent_id": agent_id[:100],
                         "stage_id": gate.gate_name[:100],
+                        "gate_type": gate_type,
                         "gate_status": gate_status,
                         "checked_by": gate.reviewer[:100],
                         "payload_sha256": gate.frozen_pointer_sha256,
@@ -865,7 +856,8 @@ class _DeliveryContext:
     embedding_model: str
     embedding_dim: int
     new_comp_specs: list[dict[str, Any]]
-    use_custom_mock_clients: bool
+    tier2_uses_mock: bool
+    rag_uses_mock: bool
     db: Any
     needs_db_rag: bool
     needs_db_tier2: bool
@@ -935,10 +927,15 @@ def _prepare_delivery_context(
     embedding_dim = int(studio_emb.dimensions)
     new_comp_specs = list(arch.new_components_to_create) if arch else []
 
-    use_custom_mock_clients = (
-        active_deps.catalog_client is not None or active_deps.rag_store is not None
-    ) and active_deps.metadata_db is None
-    db = active_deps.get_metadata_db() if not use_custom_mock_clients else None
+    tier2_uses_mock = active_deps.catalog_client is not None and active_deps.metadata_db is None
+    rag_uses_mock = active_deps.rag_store is not None and active_deps.metadata_db is None
+    need_db_for_tier2 = active_deps.enable_tier2_registration and not tier2_uses_mock
+    need_db_for_rag = active_deps.enable_rag_indexing and not rag_uses_mock
+    db = (
+        active_deps.metadata_db
+        if active_deps.metadata_db is not None
+        else (active_deps.get_metadata_db() if (need_db_for_tier2 or need_db_for_rag) else None)
+    )
 
     needs_db_rag = active_deps.enable_rag_indexing and (
         db is not None or active_deps.rag_store is not None
@@ -981,7 +978,8 @@ def _prepare_delivery_context(
         embedding_model=embedding_model,
         embedding_dim=embedding_dim,
         new_comp_specs=new_comp_specs,
-        use_custom_mock_clients=use_custom_mock_clients,
+        tier2_uses_mock=tier2_uses_mock,
+        rag_uses_mock=rag_uses_mock,
         db=db,
         needs_db_rag=needs_db_rag,
         needs_db_tier2=needs_db_tier2,
@@ -1201,6 +1199,8 @@ def _run_postgres_commit_for_ctx(
     embedding_model: str,
     embedding_dimension: int,
     new_comp_embeddings: Sequence[tuple[dict[str, Any], list[float]]],
+    enable_tier2: Optional[bool] = None,
+    enable_rag: Optional[bool] = None,
 ) -> tuple[bool, bool]:
     return _execute_atomic_postgres_commit(
         db=ctx.db,
@@ -1223,8 +1223,8 @@ def _run_postgres_commit_for_ctx(
         embedding_model=embedding_model,
         embedding_dimension=embedding_dimension,
         new_component_embeddings=new_comp_embeddings,
-        enable_tier2=ctx.needs_db_tier2,
-        enable_rag=ctx.needs_db_rag,
+        enable_tier2=ctx.needs_db_tier2 if enable_tier2 is None else enable_tier2,
+        enable_rag=ctx.needs_db_rag if enable_rag is None else enable_rag,
     )
 
 
@@ -1239,38 +1239,44 @@ def _execute_step4_sync(
 ) -> tuple[bool, bool]:
     tier2_registered = False
     rag_indexed = False
+    db_tier2 = ctx.needs_db_tier2 and not ctx.tier2_uses_mock
+    db_rag = ctx.needs_db_rag and not ctx.rag_uses_mock
     try:
-        if ctx.db is not None and (ctx.needs_db_tier2 or ctx.needs_db_rag):
-            tier2_registered, rag_indexed = _run_postgres_commit_for_ctx(
+        if ctx.db is not None and (db_tier2 or db_rag):
+            t2_ok, r_ok = _run_postgres_commit_for_ctx(
                 ctx=ctx,
                 state=state,
                 adr_embeddings=adr_embeddings,
                 embedding_model=embedding_model,
                 embedding_dimension=embedding_dimension,
                 new_comp_embeddings=new_comp_embeddings,
+                enable_tier2=db_tier2,
+                enable_rag=db_rag,
             )
-        elif ctx.use_custom_mock_clients and (ctx.needs_db_tier2 or ctx.needs_db_rag):
+            tier2_registered = tier2_registered or t2_ok
+            rag_indexed = rag_indexed or r_ok
+        if ctx.tier2_uses_mock and ctx.needs_db_tier2:
             tier2_registered = _record_tier2_via_mock_clients(
                 ctx=ctx,
                 state=state,
                 new_component_embeddings=new_comp_embeddings,
             )
-            rag_store = ctx.active_deps.rag_store
-            if ctx.needs_db_rag and rag_store is not None:
-                kwargs = _rag_upsert_payload(
-                    ctx=ctx,
-                    adr_embeddings=adr_embeddings,
-                    embedding_model=embedding_model,
-                    embedding_dimension=embedding_dimension,
-                )
-                sync_fn = getattr(rag_store, "upsert_document_and_chunks_sync", None)
-                if callable(sync_fn):
-                    sync_fn(**kwargs)
-                else:
-                    res = rag_store.upsert_document_and_chunks(**kwargs)
-                    if inspect.isawaitable(res):
-                        run_coro_sync(res)
-                rag_indexed = True
+        rag_store = ctx.active_deps.rag_store
+        if ctx.rag_uses_mock and ctx.needs_db_rag and rag_store is not None:
+            kwargs = _rag_upsert_payload(
+                ctx=ctx,
+                adr_embeddings=adr_embeddings,
+                embedding_model=embedding_model,
+                embedding_dimension=embedding_dimension,
+            )
+            sync_fn = getattr(rag_store, "upsert_document_and_chunks_sync", None)
+            if callable(sync_fn):
+                sync_fn(**kwargs)
+            else:
+                res = rag_store.upsert_document_and_chunks(**kwargs)
+                if inspect.isawaitable(res):
+                    run_coro_sync(res)
+            rag_indexed = True
     except DeliveryError:
         raise
     except Exception as exc:
@@ -1289,32 +1295,39 @@ async def _execute_step4_async(
 ) -> tuple[bool, bool]:
     tier2_registered = False
     rag_indexed = False
+    db_tier2 = ctx.needs_db_tier2 and not ctx.tier2_uses_mock
+    db_rag = ctx.needs_db_rag and not ctx.rag_uses_mock
     try:
-        if ctx.db is not None and (ctx.needs_db_tier2 or ctx.needs_db_rag):
-            tier2_registered, rag_indexed = _run_postgres_commit_for_ctx(
+        if ctx.db is not None and (db_tier2 or db_rag):
+            t2_ok, r_ok = await asyncio.to_thread(
+                _run_postgres_commit_for_ctx,
                 ctx=ctx,
                 state=state,
                 adr_embeddings=adr_embeddings,
                 embedding_model=embedding_model,
                 embedding_dimension=embedding_dimension,
                 new_comp_embeddings=new_comp_embeddings,
+                enable_tier2=db_tier2,
+                enable_rag=db_rag,
             )
-        elif ctx.use_custom_mock_clients and (ctx.needs_db_tier2 or ctx.needs_db_rag):
+            tier2_registered = tier2_registered or t2_ok
+            rag_indexed = rag_indexed or r_ok
+        if ctx.tier2_uses_mock and ctx.needs_db_tier2:
             tier2_registered = _record_tier2_via_mock_clients(
                 ctx=ctx,
                 state=state,
                 new_component_embeddings=new_comp_embeddings,
             )
-            rag_store = ctx.active_deps.rag_store
-            if ctx.needs_db_rag and rag_store is not None:
-                kwargs = _rag_upsert_payload(
-                    ctx=ctx,
-                    adr_embeddings=adr_embeddings,
-                    embedding_model=embedding_model,
-                    embedding_dimension=embedding_dimension,
-                )
-                await _maybe_await(rag_store.upsert_document_and_chunks(**kwargs))
-                rag_indexed = True
+        rag_store = ctx.active_deps.rag_store
+        if ctx.rag_uses_mock and ctx.needs_db_rag and rag_store is not None:
+            kwargs = _rag_upsert_payload(
+                ctx=ctx,
+                adr_embeddings=adr_embeddings,
+                embedding_model=embedding_model,
+                embedding_dimension=embedding_dimension,
+            )
+            await _maybe_await(rag_store.upsert_document_and_chunks(**kwargs))
+            rag_indexed = True
     except DeliveryError:
         raise
     except Exception as exc:

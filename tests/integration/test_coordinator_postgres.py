@@ -339,14 +339,14 @@ class _PGFakeSpecAnalyst:
         if any(r.resolved for r in rounds):
             return {
                 "current_phase": "understand",
-                "spec_validation_status": "valid",
+                "spec_validation_status": "accepted",
                 "has_open_gaps": False,
                 "parsed_spec": parsed,
                 "parsed_spec_summary": summary,
             }
         return {
             "current_phase": "understand",
-            "spec_validation_status": "needs_clarification",
+            "spec_validation_status": "clarify",
             "has_open_gaps": True,
             "parsed_spec": parsed,
             "parsed_spec_summary": summary,
@@ -378,7 +378,7 @@ class _PGFakeSpecAnalyst:
         )
         return {
             "current_phase": "understand",
-            "spec_validation_status": "valid",
+            "spec_validation_status": "accepted",
             "has_open_gaps": False,
             "clarification_rounds": [resolved_round],
             "enriched_requirements": [
@@ -603,7 +603,16 @@ def test_coordinator_postgres_checkpointer_gates_and_atomic_delivery(tmp_path: P
                     f"SELECT COUNT(*) FROM {tier2_table('stage_gate_record')} WHERE run_id = %s",
                     (run_id,),
                 )
-                assert cur.fetchone()[0] >= 3
+                gate_count = cur.fetchone()[0]
+                assert gate_count >= 3
+
+                # Re-running node_delivery for same run_id stays idempotent (no duplicate stage_gate_record rows)
+                node_delivery(r4, deps=deps)
+                cur.execute(
+                    f"SELECT COUNT(*) FROM {tier2_table('stage_gate_record')} WHERE run_id = %s",
+                    (run_id,),
+                )
+                assert cur.fetchone()[0] == gate_count
 
                 cur.execute(
                     """
