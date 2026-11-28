@@ -447,6 +447,7 @@ def run_generated_tests(
         return [], {"executed": False, "reason": "no_test_files_found"}
 
     env = dict(os.environ)
+    env.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
     existing_pp = env.get("PYTHONPATH", "")
     paths = [str(code_dir.resolve()), str(DEFAULT_PROJECT_ROOT.resolve())]
     if existing_pp:

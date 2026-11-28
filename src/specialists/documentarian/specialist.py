@@ -269,7 +269,7 @@ class DocumentarianSpecialist:
             "current_phase": "document",
             "impl_doc_revisions": [revision],
             "impl_doc_revision_count": next_rev,
-            "impl_doc_approved": False,
+            "impl_docs_approved": False,
             "impl_doc_feedback": None,
             "impl_docs_pointer": impl_pointer,
             "tier3_contract_pointer": tier3_pointer,

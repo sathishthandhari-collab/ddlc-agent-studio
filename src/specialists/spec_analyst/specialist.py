@@ -464,7 +464,9 @@ class SpecAnalystSpecialist:
         summary = summarize_parsed_spec(parsed_dict)
 
         if merged_questions:
-            next_round_num = len(projection.clarification_rounds) + 1
+            next_round_num = (
+                max((r.round_number for r in projection.clarification_rounds), default=0) + 1
+            )
             new_round = ClarificationRound(
                 round_number=next_round_num,
                 questions=merged_questions,

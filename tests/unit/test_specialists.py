@@ -760,7 +760,7 @@ def test_validate_sql_ast_valid() -> None:
 
 
 def test_validate_sql_ast_invalid() -> None:
-    ok, err = validate_sql_ast("SELECT id, FROM orders", dialect="snowflake")
+    ok, err = validate_sql_ast("SELECT FROM ((", dialect="snowflake")
     assert ok is False
     assert len(err) > 0
 '''

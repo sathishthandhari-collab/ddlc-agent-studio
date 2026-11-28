@@ -8,6 +8,7 @@ from typing import Any, Optional
 
 from tenacity import (
     AsyncRetrying,
+    Retrying,
     retry_if_not_exception_type,
     stop_after_attempt,
     wait_exponential,
@@ -110,15 +111,62 @@ class LiteLLMEmbedder:
             f"Set {target_env} in the environment or .env before calling embed_texts()."
         )
 
-    async def _embed_batch(self, litellm_mod: Any, batch: list[str]) -> list[list[float]]:
-        """Execute a single LiteLLM embedding request with exponential retry on transient failures."""
+    def _non_retryable_exceptions(self, litellm_mod: Any) -> tuple[type[BaseException], ...]:
         auth_exc_type = getattr(litellm_mod, "AuthenticationError", None)
-        non_retryable: tuple[type[BaseException], ...] = (
-            (EmbeddingConfigError, auth_exc_type)
-            if isinstance(auth_exc_type, type) and issubclass(auth_exc_type, BaseException)
-            else (EmbeddingConfigError,)
+        if isinstance(auth_exc_type, type) and issubclass(auth_exc_type, BaseException):
+            return (EmbeddingConfigError, auth_exc_type)
+        return (EmbeddingConfigError,)
+
+    def _parse_batch_response(self, response: Any, batch_size: int) -> list[list[float]]:
+        items = list(response.data)
+        if items and isinstance(items[0], dict) and "index" in items[0]:
+            items.sort(key=lambda item: item["index"])
+        elif items and hasattr(items[0], "index") and getattr(items[0], "index") is not None:
+            items.sort(key=lambda item: item.index)
+
+        vectors: list[list[float]] = []
+        for item in items:
+            raw_vec = item["embedding"] if isinstance(item, dict) else item.embedding
+            vectors.append([float(val) for val in raw_vec])
+
+        if len(vectors) != batch_size:
+            raise RuntimeError(
+                f"Embedding count mismatch: sent {batch_size} texts, received {len(vectors)} vectors."
+            )
+        return vectors
+
+    def _auth_error(self, exc: BaseException) -> EmbeddingConfigError:
+        if isinstance(exc, EmbeddingConfigError):
+            return exc
+        return EmbeddingConfigError(
+            f"Authentication failed for embedding provider '{self.provider}' "
+            f"and model '{self.model_name}': {exc}"
         )
 
+    def _embed_batch_sync(self, litellm_mod: Any, batch: list[str]) -> list[list[float]]:
+        """Execute a synchronous LiteLLM embedding request with exponential retry."""
+        non_retryable = self._non_retryable_exceptions(litellm_mod)
+        response: Any = None
+        for attempt in Retrying(
+            stop=stop_after_attempt(self.max_retries),
+            wait=wait_exponential(multiplier=1, min=1, max=10),
+            retry=retry_if_not_exception_type(non_retryable),
+            reraise=True,
+        ):
+            with attempt:
+                try:
+                    response = litellm_mod.embedding(
+                        model=self.model_name,
+                        input=batch,
+                        dimensions=self.dimensions,
+                    )
+                except non_retryable as exc:
+                    raise self._auth_error(exc) from exc
+        return self._parse_batch_response(response, len(batch))
+
+    async def _embed_batch(self, litellm_mod: Any, batch: list[str]) -> list[list[float]]:
+        """Execute a single LiteLLM embedding request with exponential retry on transient failures."""
+        non_retryable = self._non_retryable_exceptions(litellm_mod)
         response: Any = None
         async for attempt in AsyncRetrying(
             stop=stop_after_attempt(self.max_retries),
@@ -134,29 +182,23 @@ class LiteLLMEmbedder:
                         dimensions=self.dimensions,
                     )
                 except non_retryable as exc:
-                    if isinstance(exc, EmbeddingConfigError):
-                        raise
-                    raise EmbeddingConfigError(
-                        f"Authentication failed for embedding provider '{self.provider}' "
-                        f"and model '{self.model_name}': {exc}"
-                    ) from exc
+                    raise self._auth_error(exc) from exc
+        return self._parse_batch_response(response, len(batch))
 
-        items = list(response.data)
-        if items and isinstance(items[0], dict) and "index" in items[0]:
-            items.sort(key=lambda item: item["index"])
-        elif items and hasattr(items[0], "index") and getattr(items[0], "index") is not None:
-            items.sort(key=lambda item: item.index)
+    def embed_texts_sync(self, texts: Sequence[str]) -> list[list[float]]:
+        """Synchronously batch-generate vector embeddings via LiteLLM without starting an event loop."""
+        if not texts:
+            return []
 
-        vectors: list[list[float]] = []
-        for item in items:
-            raw_vec = item["embedding"] if isinstance(item, dict) else item.embedding
-            vectors.append([float(val) for val in raw_vec])
+        self._validate_provider_credentials()
+        litellm_mod = _import_litellm()
 
-        if len(vectors) != len(batch):
-            raise RuntimeError(
-                f"Embedding count mismatch: sent {len(batch)} texts, received {len(vectors)} vectors."
-            )
-        return vectors
+        text_list = list(texts)
+        all_vectors: list[list[float]] = []
+        for start in range(0, len(text_list), self.batch_size):
+            batch = text_list[start : start + self.batch_size]
+            all_vectors.extend(self._embed_batch_sync(litellm_mod, batch))
+        return all_vectors
 
     async def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
         """Batch-generate vector embeddings via LiteLLM with retry."""
