@@ -153,9 +153,9 @@ def format_node_update_markdown(node_name: str, update: Mapping[str, Any]) -> st
         lines.append("**Activity:**")
         lines.extend(format_build_log_entry(item) for item in logs[-6:])
 
-    findings = list(update.get("research_findings") or [])
-    if findings:
-        latest = _to_dict(findings[-1])
+    raw_findings = update.get("research_findings")
+    if raw_findings:
+        latest = _to_dict(raw_findings[-1] if isinstance(raw_findings, (list, tuple)) else raw_findings)
         if latest:
             lines.extend(
                 [
@@ -180,12 +180,13 @@ def format_node_update_markdown(node_name: str, update: Mapping[str, Any]) -> st
     impl_revs = list(update.get("impl_doc_revisions") or [])
     if impl_revs:
         latest_doc = _to_dict(impl_revs[-1])
-        ptr = _to_dict(latest_doc.get("package_pointer"))
+        pkg = _to_dict(latest_doc.get("package"))
+        ptr = _to_dict(pkg.get("pointer") or latest_doc.get("package_pointer"))
+        sha = str(ptr.get("payload_sha256") or ptr.get("sha256") or "")[:12] or "pending"
         lines.extend(
             [
                 "",
-                f"**Impl Docs Rev {latest_doc.get('revision_number', 1)}:** "
-                f"SHA `{str(ptr.get('sha256') or '')[:12] or 'pending'}`",
+                f"**Impl Docs Rev {latest_doc.get('revision_number', 1)}:** SHA `{sha}`",
             ]
         )
 
@@ -194,7 +195,16 @@ def format_node_update_markdown(node_name: str, update: Mapping[str, Any]) -> st
         latest_rep = _to_dict(reports[-1])
         if latest_rep:
             passed = bool(latest_rep.get("passed"))
-            summary = latest_rep.get("summary") or ""
+            test_sum = _to_dict(latest_rep.get("test_summary"))
+            summary = (
+                latest_rep.get("summary")
+                or test_sum.get("summary")
+                or (
+                    f"checks={latest_rep.get('checks_run')}, issues={len(latest_rep.get('issues') or [])}"
+                    if latest_rep.get("checks_run") is not None
+                    else ""
+                )
+            )
             lines.extend(
                 [
                     "",
@@ -213,16 +223,26 @@ def format_node_update_markdown(node_name: str, update: Mapping[str, Any]) -> st
             ]
         )
 
-    if update.get("abort_reason"):
-        lines.extend(["", f"**Abort Reason:** {update['abort_reason']}"])
+    abort_msg = update.get("abort_reason") or update.get("escalation_reason") or update.get("last_error")
+    if abort_msg:
+        lines.extend(["", f"**Reason / Diagnostic:** {abort_msg}"])
 
     return "\n".join(line for line in lines if line is not None).strip()
 
 
 def format_delivery_summary(state: Mapping[str, Any]) -> str:
     """Render final completion or abort summary Markdown from BlackboardState."""
-    if state.get("aborted") or state.get("current_phase") == "aborted":
-        reason = state.get("abort_reason") or "Run aborted by operator or safety valve."
+    if (
+        state.get("aborted")
+        or state.get("current_phase") == "aborted"
+        or state.get("human_escalated_decision") == "abort"
+    ):
+        reason = (
+            state.get("abort_reason")
+            or state.get("escalation_reason")
+            or state.get("last_error")
+            or "Run aborted by operator or safety valve."
+        )
         return "\n".join(
             [
                 "### Run Stopped Cleanly",
@@ -258,7 +278,16 @@ def format_delivery_summary(state: Mapping[str, Any]) -> str:
     if reports:
         latest_rep = _to_dict(reports[-1])
         passed = bool(latest_rep.get("passed"))
-        summary = latest_rep.get("summary") or ""
+        test_sum = _to_dict(latest_rep.get("test_summary"))
+        summary = (
+            latest_rep.get("summary")
+            or test_sum.get("summary")
+            or (
+                f"checks={latest_rep.get('checks_run')}, issues={len(latest_rep.get('issues') or [])}"
+                if latest_rep.get("checks_run") is not None
+                else ""
+            )
+        )
         lines.extend(
             [
                 "",
@@ -328,6 +357,20 @@ def extract_interrupt_from_snapshot(snapshot: Any) -> Optional[dict[str, Any]]:
     return None
 
 
+def unwrap_recovered_interrupt(entry: Any) -> Optional[dict[str, Any]]:
+    """Extract normalized gate payload from ThreadRecoverySnapshot.pending_interrupts item."""
+    if entry is None:
+        return None
+    if isinstance(entry, Mapping):
+        if "gate" in entry:
+            return dict(entry)
+        val = entry.get("value")
+        if isinstance(val, Mapping):
+            return dict(val)
+        return dict(entry)
+    return _normalize_interrupt_value(entry)
+
+
 def build_telemetry_handler(
     *,
     run_id: str,
@@ -352,7 +395,7 @@ def build_telemetry_handler(
         operation_kind=f"meta_{mode}",
         initiator_id=initiator_id,
         initiator_type="human",
-        trigger_type="ui_chainlit",
+        trigger_type="manual",
         db=db,
         db_uri=resolved_uri,
         enabled=should_enable,
@@ -370,49 +413,55 @@ def _record_telemetry_pre_turn(
 ) -> None:
     if handler is None or not handler.enabled:
         return
-    if not is_resume:
-        handler.start_run(
-            run_id=run_id,
-            operation_kind=f"meta_{mode_label}",
-            run_parameters={"thread_id": thread_id, "mode": mode_label},
-        )
-        handler.record_audit_event(
-            action="meta_run_started",
-            actor_id=handler.initiator_id or "studio-user",
-            actor_type="human",
-            target_entity_type="agent_run",
-            target_entity_id=run_id,
-            outcome="success",
-            run_id=run_id,
-            details={"thread_id": thread_id, "mode": mode_label},
-        )
-        return
+    try:
+        if not is_resume:
+            handler.start_run(
+                run_id=run_id,
+                operation_kind=f"meta_{mode_label}",
+                run_parameters={"thread_id": thread_id, "mode": mode_label},
+            )
+            handler.record_audit_event(
+                action="meta_run_started",
+                actor_id=handler.initiator_id or "studio-user",
+                actor_type="human",
+                target_entity_type="agent_run",
+                target_entity_id=run_id,
+                outcome="success",
+                run_id=run_id,
+                details={"thread_id": thread_id, "mode": mode_label},
+            )
+            return
 
-    if resume_decision:
-        decision = str(resume_decision.get("decision") or "approved")
-        reviewer = str(resume_decision.get("reviewer") or handler.initiator_id or "studio-user")
-        feedback = resume_decision.get("feedback")
-        handler.record_decision(
-            decision_type="human_gate_decision",
-            decision_status="decided",
-            decision_value=decision,
-            decided_by=reviewer,
-            decided_by_type="human",
-            rationale=str(feedback) if feedback else None,
-            details={"thread_id": thread_id, "payload": dict(resume_decision)},
-            run_id=run_id,
-        )
-        handler.record_audit_event(
-            action="human_gate_resumed",
-            actor_id=reviewer,
-            actor_type="human",
-            target_entity_type="agent_run",
-            target_entity_id=run_id,
-            outcome="success",
-            run_id=run_id,
-            details={"thread_id": thread_id, "decision": decision},
-        )
-    handler.complete_run("running", run_id=run_id)
+        if resume_decision:
+            decision = str(resume_decision.get("decision") or "approved")
+            reviewer = str(resume_decision.get("reviewer") or handler.initiator_id or "studio-user")
+            feedback = resume_decision.get("feedback")
+            rationale = str(feedback).strip() if feedback and str(feedback).strip() else (
+                f"Operator selected '{decision}' at interactive Chainlit gate."
+            )
+            handler.record_decision(
+                decision_type="human_gate_decision",
+                decision_status="decided",
+                decision_value=decision,
+                decided_by=reviewer,
+                decided_by_type="human",
+                rationale=rationale,
+                details={"thread_id": thread_id, "payload": dict(resume_decision)},
+                run_id=run_id,
+            )
+            handler.record_audit_event(
+                action="human_gate_resumed",
+                actor_id=reviewer,
+                actor_type="human",
+                target_entity_type="agent_run",
+                target_entity_id=run_id,
+                outcome="success",
+                run_id=run_id,
+                details={"thread_id": thread_id, "decision": decision},
+            )
+        handler.complete_run("running", run_id=run_id)
+    except Exception:
+        pass
 
 
 def _record_telemetry_post_turn(
@@ -429,7 +478,10 @@ def _record_telemetry_post_turn(
         "aborted": "cancelled",
         "failed": "failed",
     }
-    handler.complete_run(mapping[status], run_id=run_id)
+    try:
+        handler.complete_run(mapping[status], run_id=run_id)
+    except Exception:
+        pass
 
 
 async def _emit_step_event(
@@ -769,7 +821,11 @@ async def run_coordinator_turn(
                 emitted_events=emitted_events,
             )
 
-        is_aborted = bool(final_state.get("aborted") or final_state.get("current_phase") == "aborted")
+        is_aborted = bool(
+            final_state.get("aborted")
+            or final_state.get("current_phase") == "aborted"
+            or final_state.get("human_escalated_decision") == "abort"
+        )
         outcome_status: Literal["aborted", "completed"] = "aborted" if is_aborted else "completed"
         _record_telemetry_post_turn(telemetry_handler, run_id=resolved_run_id, status=outcome_status)
         return WorkflowTurnResult(

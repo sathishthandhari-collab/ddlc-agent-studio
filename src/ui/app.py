@@ -35,6 +35,7 @@ from src.ui.handlers import (
     format_delivery_summary,
     is_windows_proactor_loop,
     run_coordinator_turn,
+    unwrap_recovered_interrupt,
 )
 
 CANONICAL_SPEC_REL_PATH = Path("tests/reference_specs/dbt_pipeline_builder_agent.yaml")
@@ -599,7 +600,8 @@ async def on_chat_resume(thread: dict[str, Any]) -> None:
     cl.user_session.set("active_agent", snapshot.state.get("target_agent_name"))
 
     if snapshot.pending_interrupts:
-        cl.user_session.set("awaiting_gate", snapshot.pending_interrupts[0])
+        pending_gate = unwrap_recovered_interrupt(snapshot.pending_interrupts[0])
+        cl.user_session.set("awaiting_gate", pending_gate)
         await cl.Message(
             content=(
                 f"Recovered paused checkpoint on thread `{thread_id}` (`run_id={recovered_run_id}`). "
@@ -642,7 +644,7 @@ async def _resume_session_thread(
         await cl.Message(content=format_delivery_summary(snapshot.state)).send()
         return
 
-    pending = snapshot.pending_interrupts[0]
+    pending = unwrap_recovered_interrupt(snapshot.pending_interrupts[0]) or {}
     decision_payload = await handle_gate_interrupt(pending, reviewer=reviewer)
     if decision_payload is None:
         await cl.Message(
@@ -727,7 +729,8 @@ async def on_message(message: cl.Message) -> None:
             return
         pending_msg = ""
         if snap.pending_interrupts:
-            pending_msg = "\n\n**Pending Human Gate:**\n" + render_gate_prompt(snap.pending_interrupts[0])
+            pending_gate = unwrap_recovered_interrupt(snap.pending_interrupts[0]) or {}
+            pending_msg = "\n\n**Pending Human Gate:**\n" + render_gate_prompt(pending_gate)
         await cl.Message(
             content=(
                 f"### Checkpoint Status (`{thread_id}`)\n"

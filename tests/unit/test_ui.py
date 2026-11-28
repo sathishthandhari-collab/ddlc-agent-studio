@@ -9,21 +9,28 @@ from types import SimpleNamespace
 from typing import Any, Optional
 
 import pytest
+from langchain_core.callbacks import BaseCallbackHandler
 from src.coordinator.dependencies import CoordinatorDeps
 from src.state.blackboard import (
     ArchitectureProposal,
     BuildLogEntry,
+    ClarificationAnswer,
     ClarificationQuestion,
-    ContractPointer,
+    ClarificationRound,
     ImplDocPackage,
     ImplDocRevision,
     ParsedSpecSummary,
     ResearchFindings,
     StageDesignSpec,
     ValidationReport,
+    build_contract_pointer_from_directory,
     initial_blackboard_state,
 )
-from src.state.checkpointer import arecover_thread_state, create_memory_checkpointer
+from src.state.checkpointer import (
+    arecover_thread_state,
+    create_memory_checkpointer,
+    make_resume_command,
+)
 from src.ui import app as ui_app
 from src.ui import gates as ui_gates
 from src.ui import handlers as ui_handlers
@@ -303,7 +310,14 @@ def test_formatters_and_interrupt_extraction() -> None:
                 "tier2_registered": True,
                 "rag_indexed": True,
             },
-            "validation_reports": [ValidationReport(passed=True, summary="All checks pass")],
+            "validation_reports": [
+                ValidationReport(
+                    attempt_number=1,
+                    passed=True,
+                    checks_run=["ast_parse", "pytest"],
+                    test_summary={"summary": "All checks pass"},
+                )
+            ],
         }
     )
     assert "Delivery Complete: `dbt_agent`" in summary and "PASSED" in summary
@@ -315,42 +329,67 @@ class _StubSpecAnalyst:
     def analyze(self, proj: Any) -> dict[str, Any]:
         summary = ParsedSpecSummary(
             agent_name="ui_smoke_agent",
-            purpose="Test Coordinator UI",
+            agent_version="1.0.0",
+            description="Test Coordinator UI",
             autonomy_level="semi_autonomous",
-            stage_count=1,
-            contract_count=1,
+            stage_ids=["run"],
+            contract_names=["input_c", "output_c"],
+        )
+        if proj.clarification_round_count >= 1 or proj.clarification_rounds:
+            return {
+                "current_phase": "understand",
+                "spec_validation_status": "valid",
+                "parsed_spec": {"agent": {"name": "ui_smoke_agent", "version": "1.0.0"}},
+                "parsed_spec_summary": summary,
+                "has_open_gaps": False,
+                "clarification_round_count": proj.clarification_round_count,
+                "build_logs": [BuildLogEntry(phase="intake", actor="spec_analyst", action="analyze", status="completed")],
+            }
+        q1 = ClarificationQuestion(
+            question_id="q1",
+            category="governance",
+            field_path="governance.audit",
+            question="Enable full audit logs?",
+            suggested_default="yes",
         )
         return {
             "current_phase": "clarify",
-            "parsed_spec": {"agent": {"name": "ui_smoke_agent"}},
+            "spec_validation_status": "valid",
+            "parsed_spec": {"agent": {"name": "ui_smoke_agent", "version": "1.0.0"}},
             "parsed_spec_summary": summary,
-            "clarification_questions": [
-                ClarificationQuestion(
-                    question_id="q1",
-                    category="governance",
-                    field_path="governance.audit",
-                    question="Enable full audit logs?",
-                    suggested_default="yes",
-                )
-            ],
+            "has_open_gaps": True,
+            "clarification_round_count": 1,
+            "clarification_rounds": [ClarificationRound(round_number=1, questions=[q1])],
             "build_logs": [BuildLogEntry(phase="intake", actor="spec_analyst", action="analyze", status="completed")],
         }
 
-    def apply_answers(self, proj: Any, answers: list[Any], *, round_number: int) -> dict[str, Any]:
+    def incorporate_answers(self, proj: Any, answers: Any) -> dict[str, Any]:
+        ans_list = [
+            a
+            if isinstance(a, ClarificationAnswer)
+            else ClarificationAnswer(question_id=str(a.get("question_id", "q1")), answer=str(a.get("answer", "yes")))
+            for a in (answers or [])
+        ]
         return {
             "current_phase": "clarify",
-            "spec_complete": True,
-            "build_logs": [BuildLogEntry(phase="clarify", actor="spec_analyst", action="apply_answers", status="completed")],
+            "has_open_gaps": False,
+            "clarification_rounds": [ClarificationRound(round_number=1, answers=ans_list, resolved=True)],
+            "build_logs": [BuildLogEntry(phase="clarify", actor="spec_analyst", action="incorporate_answers", status="completed")],
         }
 
 
 class _StubResearcher:
-    def evaluate(self, proj: Any) -> dict[str, Any]:
+    def research(self, proj: Any) -> dict[str, Any]:
+        findings = ResearchFindings(verdict="feasible", summary="Feasible with SQLGlot")
         return {
             "current_phase": "research",
-            "research_findings": [ResearchFindings(verdict="feasible", summary="Feasible with SQLGlot")],
-            "build_logs": [BuildLogEntry(phase="research", actor="researcher", action="evaluate", status="completed")],
+            "research_findings": findings,
+            "feasibility_verdict": "feasible",
+            "build_logs": [BuildLogEntry(phase="research", actor="researcher", action="research", status="completed")],
         }
+
+    async def aresearch(self, proj: Any) -> dict[str, Any]:
+        return self.research(proj)
 
 
 class _StubArchitect:
@@ -360,64 +399,122 @@ class _StubArchitect:
             "architecture_revisions": [
                 ArchitectureProposal(
                     revision_number=1,
+                    agent_name="ui_smoke_agent",
+                    agent_version="1.0.0",
                     pattern="stateful_pipeline_with_gates",
                     runtime="langgraph",
                     summary="Single-stage test graph",
-                    stages=[StageDesignSpec(stage_id="run", stage_type="transform", autonomy="autonomous", purpose="run")],
+                    stages=[
+                        StageDesignSpec(
+                            stage_id="run",
+                            name="Run Transform",
+                            stage_type="transform",
+                            autonomy="autonomous",
+                        )
+                    ],
                 )
             ],
             "architecture_revision_count": 1,
-            "build_logs": [BuildLogEntry(phase="design", actor="architect", action="propose", status="completed")],
+            "build_logs": [BuildLogEntry(phase="design", actor="architect", action="design", status="completed")],
         }
+
+    async def adesign(self, proj: Any) -> dict[str, Any]:
+        return self.design(proj)
 
 
 class _StubDocumentarian:
-    def document(self, proj: Any) -> dict[str, Any]:
+    def author_impl_docs(self, proj: Any, *, output_dir: Optional[Path] = None) -> dict[str, Any]:
+        target_dir = Path(output_dir or Path.cwd())
+        target_dir.mkdir(parents=True, exist_ok=True)
+        (target_dir / "agent.yaml").write_text(
+            "agent:\n  name: ui_smoke_agent\n  version: '1.0.0'\n",
+            encoding="utf-8",
+        )
+        (target_dir / "stages.yaml").write_text("stages:\n  run: {}\n", encoding="utf-8")
+        (target_dir / "contracts.yaml").write_text("contracts: {}\n", encoding="utf-8")
+        (target_dir / "config.yaml").write_text("config: {}\n", encoding="utf-8")
+        (target_dir / "tests.yaml").write_text("tests: {}\n", encoding="utf-8")
+        pointer = build_contract_pointer_from_directory(
+            contract_name="ui_smoke_agent_impl_docs",
+            contract_version="1.0.0",
+            base_dir=target_dir,
+        )
         pkg = ImplDocPackage(
             agent_yaml={"agent": {"name": "ui_smoke_agent", "version": "1.0.0", "runtime": "langgraph"}},
-            stages_yaml={"stages": [{"id": "run", "type": "transform", "autonomy": "autonomous"}]},
-            contracts_yaml={"contracts": {}},
-            governance_yaml={"audit": {"level": "full"}},
-            config_yaml={"llm": {}},
+            stages={"run": {"stage": {"id": "run", "name": "Run", "type": "transform", "autonomy": "autonomous"}}},
+            contracts={},
+            config_yaml={"config": {"defaults": {}, "environments": {}, "secrets": []}},
+            tests_yaml={"tests": {"contract_tests": [], "custom_tests": []}},
+            pointer=pointer,
         )
         return {
             "current_phase": "document",
             "impl_doc_revisions": [
                 ImplDocRevision(
                     revision_number=1,
-                    package_pointer=ContractPointer(contract_name="ui_smoke_agent", version="1.0.0", sha256="deadbeef"),
                     package=pkg,
                     summary="Generated impl docs",
                 )
             ],
             "impl_doc_revision_count": 1,
-            "build_logs": [BuildLogEntry(phase="document", actor="documentarian", action="generate", status="completed")],
+            "impl_docs_pointer": pointer,
+            "build_logs": [BuildLogEntry(phase="document", actor="documentarian", action="author_impl_docs", status="completed")],
         }
 
 
 class _StubBuilder:
-    def build(self, proj: Any, output_dir: Optional[Path] = None) -> dict[str, Any]:
+    def build(
+        self,
+        proj: Any,
+        *,
+        output_dir: Optional[Path] = None,
+        rag_context_xml: Optional[str] = None,
+    ) -> dict[str, Any]:
         out = Path(output_dir or Path.cwd())
         out.mkdir(parents=True, exist_ok=True)
         (out / "main.py").write_text("print('ok')\n", encoding="utf-8")
+        code_ptr = build_contract_pointer_from_directory(
+            contract_name="ui_smoke_agent_code",
+            contract_version="1.0.0",
+            base_dir=out,
+        )
         return {
             "current_phase": "construct",
-            "generated_code_pointer": ContractPointer(contract_name="ui_smoke_agent", version="1.0.0", storage_uri=out.as_uri(), sha256="cafe"),
+            "generated_code_pointer": code_ptr,
             "build_logs": [BuildLogEntry(phase="construct", actor="builder", action="build", status="completed")],
         }
+
+    async def abuild(
+        self,
+        proj: Any,
+        *,
+        output_dir: Optional[Path] = None,
+        rag_context_xml: Optional[str] = None,
+    ) -> dict[str, Any]:
+        return self.build(proj, output_dir=output_dir, rag_context_xml=rag_context_xml)
 
 
 class _StubValidator:
     def validate(self, proj: Any) -> dict[str, Any]:
         return {
             "current_phase": "validate",
-            "validation_reports": [ValidationReport(passed=True, summary="Valid", issues=[])],
+            "validation_passed": True,
+            "validation_reports": [
+                ValidationReport(
+                    attempt_number=1,
+                    passed=True,
+                    checks_run=["ast_parse", "pytest"],
+                    test_summary={"summary": "Valid"},
+                    issues=[],
+                )
+            ],
             "build_logs": [BuildLogEntry(phase="validate", actor="validator", action="validate", status="completed")],
         }
 
 
-class _StubTelemetryHandler:
+class _StubTelemetryHandler(BaseCallbackHandler):
     def __init__(self) -> None:
+        super().__init__()
         self.enabled = True
         self.initiator_id = "alice"
         self.calls: list[tuple[str, dict[str, Any]]] = []
@@ -436,7 +533,10 @@ class _StubTelemetryHandler:
 
 
 @pytest.mark.asyncio
-async def test_drive_coordinator_multi_gate_day0_telemetry_and_timeout_recovery(tmp_path: Path) -> None:
+async def test_drive_coordinator_multi_gate_day0_telemetry_and_timeout_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     cp = create_memory_checkpointer()
     deps = CoordinatorDeps(
         spec_analyst=_StubSpecAnalyst(),
@@ -456,6 +556,7 @@ async def test_drive_coordinator_multi_gate_day0_telemetry_and_timeout_recovery(
         enable_tier3_migration=False,
         strict_delivery=False,
     )
+    monkeypatch.setattr(deps, "get_metadata_db", lambda: None)
     telemetry = _StubTelemetryHandler()
     init_state = initial_blackboard_state(
         run_id="run-ui-001",
@@ -486,13 +587,15 @@ async def test_drive_coordinator_multi_gate_day0_telemetry_and_timeout_recovery(
         step_sink=events.append,
         notify_fn=lambda msg: asyncio.sleep(0, result=notifications.append(msg)),
     )
-    assert timeout_res.status == "interrupted"
+    assert timeout_res.status == "interrupted", timeout_res.error
     assert any("paused at its checkpoint" in msg for msg in notifications)
     assert any(c == ("complete_run", {"status": "paused", "run_id": "run-ui-001"}) for c in telemetry.calls)
 
     # Checkpoint remains resumable!
     snap = await arecover_thread_state(cp, "thread-ui-001")
-    assert snap is not None and snap.pending_interrupts[0]["gate"] == "clarification"
+    assert snap is not None and snap.pending_interrupts
+    recovered_gate = ui_handlers.unwrap_recovered_interrupt(snap.pending_interrupts[0])
+    assert recovered_gate is not None and recovered_gate["gate"] == "clarification"
 
     # 2. Resume checkpoint from Gate 1 through Gate 2, Gate 3, and Delivery!
     seen_gates: list[str] = []
@@ -504,9 +607,7 @@ async def test_drive_coordinator_multi_gate_day0_telemetry_and_timeout_recovery(
             return {"decision": "approved", "answers": {"q1": "yes"}, "reviewer": reviewer}
         return {"decision": "approved", "reviewer": reviewer, "feedback": None}
 
-    from src.state.checkpointer import make_resume_command
-
-    first_decision = await _approve_all_gates(snap.pending_interrupts[0], reviewer="alice")
+    first_decision = await _approve_all_gates(recovered_gate, reviewer="alice")
     final_res = await ui_app.drive_coordinator_until_pause_or_done(
         initial_or_command=make_resume_command(first_decision),
         thread_id="thread-ui-001",
@@ -522,7 +623,7 @@ async def test_drive_coordinator_multi_gate_day0_telemetry_and_timeout_recovery(
         step_sink=events.append,
         notify_fn=lambda msg: asyncio.sleep(0, result=notifications.append(msg)),
     )
-    assert final_res.status == "completed"
+    assert final_res.status == "completed", final_res.error
     assert seen_gates == ["clarification", "architecture_review", "impl_doc_review"]
     assert final_res.delivery_summary and "Delivery Complete: `ui_smoke_agent`" in final_res.delivery_summary
     assert any(c[0] == "record_decision" for c in telemetry.calls)
@@ -568,6 +669,7 @@ async def test_proactor_sync_thread_bridge_executes_without_loop_error(
         enable_tier3_migration=False,
         strict_delivery=False,
     )
+    monkeypatch.setattr(deps, "get_metadata_db", lambda: None)
     init_state = initial_blackboard_state(
         run_id="run-sync-bridge",
         thread_id="thread-sync-bridge",
@@ -586,7 +688,7 @@ async def test_proactor_sync_thread_bridge_executes_without_loop_error(
         stream_to_chainlit=False,
         step_sink=events.append,
     )
-    assert res.status == "interrupted"
+    assert res.status == "interrupted", res.error
     assert res.interrupt_payload and res.interrupt_payload["gate"] == "clarification"
     assert any(ev.node_name == "analyze_spec" for ev in events)
 

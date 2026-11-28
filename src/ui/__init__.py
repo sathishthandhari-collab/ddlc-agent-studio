@@ -20,6 +20,7 @@ from src.ui.handlers import (
     format_delivery_summary,
     format_node_update_markdown,
     run_coordinator_turn,
+    unwrap_recovered_interrupt,
 )
 
 __all__ = [
@@ -39,5 +40,6 @@ __all__ = [
     "parse_clarification_answers",
     "render_gate_prompt",
     "run_coordinator_turn",
+    "unwrap_recovered_interrupt",
     "uri_to_local_path",
 ]
