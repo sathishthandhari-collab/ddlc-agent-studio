@@ -1,0 +1,65 @@
+{{ header }}from __future__ import annotations
+
+from datetime import date, datetime, timezone
+from typing import Any, Dict, List, Literal, Optional
+
+from pydantic import BaseModel, Field, field_validator
+{% if include_generated_fileset %}
+
+class GeneratedFile(BaseModel):
+    """Single synthesized file emitted by an LLM code-generation stage."""
+
+    path: str = Field(..., description="Relative file path within the artifact bundle.")
+    content: str = Field(..., description="Complete file source code or configuration text.")
+
+
+class GeneratedFileSet(BaseModel):
+    """Structured LLM output wrapper staged to disk by a deterministic Claim Check node."""
+
+    files: List[GeneratedFile] = Field(
+        default_factory=list,
+        description="Set of generated files to stage into the sandbox bundle.",
+    )
+{% endif %}
+{% for model in submodels %}
+
+class {{ model.class_name }}(BaseModel):
+    """{{ model.docstring }}"""
+{% if not model.fields %}
+    pass
+{% else %}
+{% for fld in model.fields %}
+    {{ fld.name }}: {{ fld.annotation }} = Field({{ fld.default_expr }}{% for arg in fld.field_args %}, {{ arg }}{% endfor %}, description={{ fld.description | tojson }})
+{% endfor %}
+{% for fld in model.fields if fld.not_empty_validator %}
+
+    @field_validator({{ fld.name | tojson }})
+    @classmethod
+    def _validate_{{ fld.name }}_not_empty(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and not value.strip():
+            raise ValueError("{{ fld.name }} must not be empty or whitespace.")
+        return value
+{% endfor %}
+{% endif %}
+{% endfor %}
+{% for model in contract_models %}
+
+class {{ model.class_name }}(BaseModel):
+    """{{ model.docstring }}"""
+{% if not model.fields %}
+    pass
+{% else %}
+{% for fld in model.fields %}
+    {{ fld.name }}: {{ fld.annotation }} = Field({{ fld.default_expr }}{% for arg in fld.field_args %}, {{ arg }}{% endfor %}, description={{ fld.description | tojson }})
+{% endfor %}
+{% for fld in model.fields if fld.not_empty_validator %}
+
+    @field_validator({{ fld.name | tojson }})
+    @classmethod
+    def _validate_{{ fld.name }}_not_empty(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and not value.strip():
+            raise ValueError("{{ fld.name }} must not be empty or whitespace.")
+        return value
+{% endfor %}
+{% endif %}
+{% endfor %}

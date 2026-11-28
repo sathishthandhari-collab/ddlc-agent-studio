@@ -402,6 +402,27 @@ class TestBlackboardStateAndReducers:
         open_qs = get_open_clarification_questions(state)
         assert [q.question_id for q in open_qs] == ["q2"]
 
+    def test_approved_selectors_return_none_on_missing_or_unapproved_version(
+        self, tmp_path: Path
+    ) -> None:
+        state = _sample_populated_blackboard(tmp_path)
+        assert get_approved_architecture(state) is not None
+        assert get_approved_impl_docs(state) is not None
+
+        # Explicit approved version pointing to non-existent revision must NOT silently fall back
+        state["approved_architecture_version"] = 999
+        state["approved_impl_doc_version"] = 999
+        assert get_approved_architecture(state) is None
+        assert get_approved_impl_docs(state) is None
+
+        # Gate flag False overrides even approved=True revisions in history
+        state["approved_architecture_version"] = None
+        state["approved_impl_doc_version"] = None
+        state["architecture_approved"] = False
+        state["impl_docs_approved"] = False
+        assert get_approved_architecture(state) is None
+        assert get_approved_impl_docs(state) is None
+
 
 # ---------------------------------------------------------------------------
 # 2. Claim Check ContractPointer & Path Traversal Guard Tests
@@ -470,6 +491,48 @@ class TestContractPointerClaimCheck:
         state = _sample_populated_blackboard(tmp_path)
         checks = verify_state_pointers(state)
         assert checks == {"generated_code_pointer": True}
+
+    def test_directory_pointer_rejects_empty_manifest_and_tolerates_untracked_build_outputs(
+        self, tmp_path: Path
+    ) -> None:
+        from src.state.blackboard import compute_directory_sha256
+
+        bundle_dir = tmp_path / "dbt_bundle"
+        (bundle_dir / "models" / "staging").mkdir(parents=True)
+        model_file = bundle_dir / "models" / "staging" / "stg_orders.sql"
+        schema_file = bundle_dir / "schema.yml"
+        model_file.write_text("SELECT order_id FROM raw.orders\n", encoding="utf-8")
+        schema_file.write_text("version: 2\n", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="files cannot be empty"):
+            compute_directory_sha256(bundle_dir, files=[])
+        with pytest.raises(ValueError, match="Invalid empty or current-directory manifest entry"):
+            compute_directory_sha256(bundle_dir, files=[""])
+        with pytest.raises(ValueError, match="Invalid empty or current-directory manifest entry"):
+            compute_directory_sha256(bundle_dir, files=["."])
+        with pytest.raises(ValueError, match="files cannot be empty"):
+            build_contract_pointer_from_directory(
+                contract_name="empty_manifest",
+                base_dir=bundle_dir,
+                files=[],
+            )
+
+        ptr = build_contract_pointer_from_directory(
+            contract_name="dbt_bundle",
+            base_dir=bundle_dir,
+            files=["models/staging/stg_orders.sql", "schema.yml"],
+        )
+        assert verify_contract_pointer(ptr) is True
+
+        # Writing untracked build artifacts (e.g. target/compiled/) must not invalidate pinned manifest
+        compiled = bundle_dir / "target" / "compiled" / "stg_orders.sql"
+        compiled.parent.mkdir(parents=True)
+        compiled.write_text("SELECT order_id FROM analytics.raw_orders\n", encoding="utf-8")
+        assert verify_contract_pointer(ptr) is True
+
+        # Modifying a manifest-pinned file must still fail verification
+        model_file.write_text("SELECT * FROM raw.orders\n", encoding="utf-8")
+        assert verify_contract_pointer(ptr) is False
 
 
 # ---------------------------------------------------------------------------
@@ -591,6 +654,91 @@ class TestStateProjectionsFunnel:
             "leaf_coder",
             "validator",
         }
+
+    def test_documentarian_hides_unselected_catalog_when_reused_empty_and_projects_on_revise(
+        self, tmp_path: Path
+    ) -> None:
+        state = _sample_populated_blackboard(tmp_path)
+        approved_no_reuse = state["architecture_revisions"][1].model_copy(
+            update={"reused_components": []}
+        )
+        state["architecture_revisions"] = [state["architecture_revisions"][0], approved_no_reuse]
+        state["validation_reports"] = []
+        state["active_fix_instructions"] = []
+        state["impl_doc_feedback"] = None
+        state["impl_doc_decision"] = "revise"
+
+        doc_slice = project_for_documentarian(state)
+        assert doc_slice.shared_component_specs == []
+        assert doc_slice.current_impl_docs is not None
+
+        # Without revise/feedback/change/fixes, current_impl_docs should be omitted on fresh draft
+        state["impl_doc_decision"] = None
+        fresh_doc_slice = project_for_documentarian(state)
+        assert fresh_doc_slice.current_impl_docs is None
+
+    def test_architect_projects_current_proposal_on_revise_without_feedback_text(
+        self, tmp_path: Path
+    ) -> None:
+        state = _sample_populated_blackboard(tmp_path)
+        state["mode"] = "build"
+        state["architecture_feedback"] = None
+        state["architecture_decision"] = "revise"
+
+        revising = project_for_architect(state)
+        assert revising.current_architecture is not None
+        assert revising.current_architecture.revision_number == 2
+
+        state["architecture_decision"] = None
+        fresh = project_for_architect(state)
+        assert fresh.current_architecture is None
+
+    def test_leaf_coder_projects_llm_config_prompt_and_output_schema_when_tools_empty(
+        self, tmp_path: Path
+    ) -> None:
+        import copy
+
+        state = _sample_populated_blackboard(tmp_path)
+        pkg = state["impl_doc_revisions"][1].package.model_copy(deep=True)
+        gen_stage = copy.deepcopy(pkg.stages["generate"])
+        gen_stage["processing"]["tools"] = []
+        gen_stage["processing"]["llm_config"] = {
+            "prompt_template_ref": "prompts/generate_sql.j2",
+            "output_schema": "DbtSqlGenerationOutput",
+        }
+        pkg.stages["generate"] = gen_stage
+        state["impl_doc_revisions"] = [
+            state["impl_doc_revisions"][0],
+            state["impl_doc_revisions"][1].model_copy(update={"package": pkg}),
+        ]
+
+        leaf = project_for_leaf_coder(state, stage_id="generate", mode="create")
+        assert leaf.tools == []
+        assert leaf.tool_name is None
+        assert leaf.handler is None
+        assert leaf.prompt_template_ref == "prompts/generate_sql.j2"
+        assert leaf.output_schema == "DbtSqlGenerationOutput"
+
+    def test_spec_analyst_hides_impl_docs_in_build_and_exposes_in_change_mode(
+        self, tmp_path: Path
+    ) -> None:
+        state = _sample_populated_blackboard(tmp_path)
+        state["mode"] = "build"
+        build_slice = project_for_spec_analyst(state)
+        assert build_slice.active_impl_docs is None
+        assert build_slice.change_request is None
+
+        state["mode"] = "change"
+        state["change_request"] = ChangeRequestContext(
+            request_text="Add PII masking stage for customer email",
+            agent_id="dbt_pipeline_builder_agent",
+            affected_stages=["generate"],
+        )
+        change_slice = project_for_spec_analyst(state)
+        assert change_slice.active_impl_docs is not None
+        assert "generate" in change_slice.active_impl_docs.stages
+        assert change_slice.change_request is not None
+        assert change_slice.change_request.agent_id == "dbt_pipeline_builder_agent"
 
 
 # ---------------------------------------------------------------------------
@@ -849,3 +997,184 @@ class TestCheckpointerUnitAndRecovery:
 
         await adelete_thread_checkpoints(checkpointer, thread_id)
         assert await arecover_thread_state(checkpointer, thread_id) is None
+
+    def test_subgraph_interrupt_bubbles_and_history_namespace_filtering(self) -> None:
+        def sub_review(state: BlackboardState) -> dict[str, Any]:
+            decision = interrupt({"gate": "sub_clarification", "round": 1})
+            return {
+                "current_phase": "design",
+                "architecture_approved": decision.get("decision") == "approved",
+            }
+
+        sub_builder = StateGraph(BlackboardState)
+        sub_builder.add_node("sub_review", sub_review)
+        sub_builder.set_entry_point("sub_review")
+        sub_builder.add_edge("sub_review", END)
+        sub_graph = sub_builder.compile()
+
+        def finish_node(state: BlackboardState) -> dict[str, Any]:
+            return {"current_phase": "completed"}
+
+        parent_builder = StateGraph(BlackboardState)
+        parent_builder.add_node("understand_sub", sub_graph)
+        parent_builder.add_node("finish", finish_node)
+        parent_builder.set_entry_point("understand_sub")
+        parent_builder.add_edge("understand_sub", "finish")
+        parent_builder.add_edge("finish", END)
+
+        checkpointer = create_memory_checkpointer()
+        app = parent_builder.compile(checkpointer=checkpointer)
+        thread_id = f"sub-{uuid4().hex[:8]}"
+        cfg = make_thread_config(thread_id)
+
+        app.invoke(initial_blackboard_state(run_id=thread_id), config=cfg)
+
+        paused = recover_thread_state(checkpointer, thread_id)
+        assert paused is not None
+        assert paused.resumable is True
+        assert paused.next_nodes == ["understand_sub"]
+        assert len(paused.pending_interrupts) == 1
+        assert paused.pending_interrupts[0]["value"] == {
+            "gate": "sub_clarification",
+            "round": 1,
+        }
+
+        all_hist = get_thread_history(checkpointer, thread_id, checkpoint_ns=None)
+        root_hist = get_thread_history(checkpointer, thread_id, checkpoint_ns="")
+        assert any(item.checkpoint_ns.startswith("understand_sub:") for item in all_hist)
+        assert all(item.checkpoint_ns == "" for item in root_hist)
+        assert len(all_hist) > len(root_hist)
+
+        resumed = app.invoke(
+            make_resume_command({"decision": "approved"}),
+            config=cfg,
+        )
+        assert resumed["current_phase"] == "completed"
+        assert resumed["architecture_approved"] is True
+
+    def test_midrun_node_exception_leaves_resumable_checkpoint(self) -> None:
+        attempts = {"count": 0}
+
+        def unstable_node(state: BlackboardState) -> dict[str, Any]:
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                raise RuntimeError("transient LLM timeout")
+            return {"current_phase": "completed"}
+
+        workflow = StateGraph(BlackboardState)
+        workflow.add_node("unstable", unstable_node)
+        workflow.set_entry_point("unstable")
+        workflow.add_edge("unstable", END)
+
+        checkpointer = create_memory_checkpointer()
+        app = workflow.compile(checkpointer=checkpointer)
+        thread_id = f"err-{uuid4().hex[:8]}"
+        cfg = make_thread_config(thread_id)
+
+        with pytest.raises(RuntimeError, match="transient LLM timeout"):
+            app.invoke(initial_blackboard_state(run_id=thread_id), config=cfg)
+
+        failed_snap = recover_thread_state(checkpointer, thread_id)
+        assert failed_snap is not None
+        assert failed_snap.resumable is True
+        assert failed_snap.next_nodes == ["unstable"]
+
+        # Resume from checkpoint by invoking with None input
+        resumed = app.invoke(None, config=cfg)
+        assert resumed["current_phase"] == "completed"
+        assert attempts["count"] == 2
+
+    def test_sync_pool_closes_cleanly_when_open_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from src.state.checkpointer import PostgresCheckpointerManager
+
+        events: list[str] = []
+
+        class _FailingPool:
+            def __init__(self, **kwargs: Any) -> None:
+                self.closed = False
+                events.append("init")
+
+            def open(self, *, wait: bool = True, timeout: float = 30.0) -> None:
+                events.append("open")
+                raise RuntimeError("connection refused")
+
+            def close(self, timeout: float = 5.0) -> None:
+                self.closed = True
+                events.append("close")
+
+        monkeypatch.setattr("src.state.checkpointer.ConnectionPool", _FailingPool)
+        mgr = PostgresCheckpointerManager(db_uri="postgresql://ddlc_app:pw@localhost:5434/db")
+
+        with pytest.raises(RuntimeError, match="connection refused"):
+            mgr.get_sync_pool()
+
+        assert events == ["init", "open", "close"]
+        assert mgr._sync_pool is None
+
+    def test_async_pool_rejects_proactor_event_loop(self) -> None:
+        import asyncio
+        import sys
+
+        from src.state.checkpointer import PostgresCheckpointerManager
+
+        if sys.platform != "win32" or not hasattr(asyncio, "ProactorEventLoop"):
+            pytest.skip("Windows ProactorEventLoop check only applies on win32.")
+
+        mgr = PostgresCheckpointerManager(db_uri="postgresql://ddlc_app:pw@localhost:5434/db")
+
+        async def _probe() -> None:
+            await mgr.get_async_pool()
+
+        loop = asyncio.ProactorEventLoop()
+        try:
+            with pytest.raises(CheckpointerConfigError, match="SelectorEventLoop"):
+                loop.run_until_complete(_probe())
+        finally:
+            loop.close()
+
+    async def test_async_saver_offloads_verify_setup_to_thread(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import asyncio
+
+        from src.state.checkpointer import PostgresCheckpointerManager
+
+        calls: list[tuple[str, Any]] = []
+        fake_pool = object()
+        fake_saver = object()
+        status = CheckpointerSchemaStatus(
+            ready=True,
+            current_version=9,
+            expected_version=9,
+            missing_tables=[],
+            error=None,
+        )
+
+        async def _fake_to_thread(fn: Any, *args: Any, **kwargs: Any) -> Any:
+            calls.append(("to_thread", fn.__name__))
+            return fn(*args, **kwargs)
+
+        def _fake_ensure(db_uri: Any = None, *, admin_db_uri: Any = None) -> CheckpointerSchemaStatus:
+            calls.append(("ensure", db_uri, admin_db_uri))
+            return status
+
+        def _fake_saver_cls(*, conn: Any, serde: Any) -> Any:
+            calls.append(("saver", conn is fake_pool))
+            return fake_saver
+
+        monkeypatch.setattr(asyncio, "to_thread", _fake_to_thread)
+        monkeypatch.setattr("src.state.checkpointer.ensure_checkpointer_setup", _fake_ensure)
+        monkeypatch.setattr("src.state.checkpointer.AsyncPostgresSaver", _fake_saver_cls)
+
+        mgr = PostgresCheckpointerManager(db_uri="postgresql://ddlc_app:pw@localhost:5434/db")
+        mgr._async_pool = fake_pool  # type: ignore[assignment]
+        saver = await mgr.get_async_saver(verify_setup=True, admin_db_uri="postgresql://admin:pw@localhost:5434/db")
+
+        assert saver is fake_saver
+        assert calls == [
+            ("to_thread", "_fake_ensure"),
+            ("ensure", "postgresql://ddlc_app:pw@localhost:5434/db", "postgresql://admin:pw@localhost:5434/db"),
+            ("saver", True),
+        ]

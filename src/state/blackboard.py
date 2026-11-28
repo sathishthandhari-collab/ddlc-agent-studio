@@ -112,7 +112,11 @@ def compute_directory_sha256(
 
     candidate_paths: list[tuple[str, Path]] = []
     if files is not None:
+        if len(files) == 0:
+            raise ValueError("files cannot be empty; pass None to hash all files in base_dir.")
         for rel in files:
+            if not rel or rel.strip() in {"", "."}:
+                raise ValueError(f"Invalid empty or current-directory manifest entry: {rel!r}")
             rel_obj = Path(rel)
             if rel_obj.is_absolute():
                 raise ValueError(f"Path traversal or absolute path disallowed: {rel!r}")
@@ -742,6 +746,7 @@ def get_approved_architecture(state: Mapping[str, Any]) -> Optional[Architecture
         for rev in reversed(revisions):
             if rev.revision_number == target_version:
                 return rev
+        return None
     for rev in reversed(revisions):
         if rev.approved:
             return rev
@@ -769,6 +774,7 @@ def get_approved_impl_docs(state: Mapping[str, Any]) -> Optional[ImplDocRevision
         for rev in reversed(revisions):
             if rev.revision_number == target_version:
                 return rev
+        return None
     for rev in reversed(revisions):
         if rev.approved:
             return rev

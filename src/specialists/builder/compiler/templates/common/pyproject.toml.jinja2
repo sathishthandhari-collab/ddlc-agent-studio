@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=69.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = {{ agent_name | replace("_", "-") | tojson }}
+version = {{ agent_version | tojson }}
+description = {{ agent_description | tojson }}
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.6.0",
+    "jinja2>=3.1.4",
+    "litellm>=1.50.0",
+    "instructor>=1.7.0",
+    "tenacity>=9.0.0",
+    "typer>=0.13.0",
+{% if runtime == "langgraph" %}
+    "langgraph>=0.2.0",
+    "langgraph-checkpoint-postgres>=2.0.0",
+{% endif %}
+{% for dep in tool_deps %}
+    {{ dep | tojson }},
+{% endfor %}
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

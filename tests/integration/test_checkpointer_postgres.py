@@ -237,3 +237,65 @@ class TestLivePostgresCheckpointer:
                     await adelete_thread_checkpoints(cleanup_saver, thread_id)
 
         run_async_selector(_run_async_lifecycle())
+
+    def test_sync_postgres_subgraph_interrupt_namespace_history_and_resume(
+        self, tmp_path: Path
+    ) -> None:
+        uri = _live_checkpointer_uri_or_skip()
+        thread_id = f"test-sub-{uuid4().hex[:10]}"
+        cfg = make_thread_config(thread_id)
+
+        def sub_gate_node(state: BlackboardState) -> dict[str, Any]:
+            decision = interrupt({"gate": "subgraph_clarification", "round": 1})
+            return {
+                "current_phase": "design",
+                "architecture_approved": decision.get("decision") == "approved",
+            }
+
+        sub_builder = StateGraph(BlackboardState)
+        sub_builder.add_node("sub_gate", sub_gate_node)
+        sub_builder.set_entry_point("sub_gate")
+        sub_builder.add_edge("sub_gate", END)
+
+        def finalize_node(state: BlackboardState) -> dict[str, Any]:
+            return {"current_phase": "completed"}
+
+        parent_builder = StateGraph(BlackboardState)
+        parent_builder.add_node("understand_sub", sub_builder.compile())
+        parent_builder.add_node("finalize", finalize_node)
+        parent_builder.set_entry_point("understand_sub")
+        parent_builder.add_edge("understand_sub", "finalize")
+        parent_builder.add_edge("finalize", END)
+
+        try:
+            with open_sync_checkpointer(db_uri=uri, verify_setup=True) as saver1:
+                app1 = parent_builder.compile(checkpointer=saver1)
+                app1.invoke(initial_blackboard_state(run_id=thread_id), config=cfg)
+
+            with open_sync_checkpointer(db_uri=uri) as saver2:
+                paused = recover_thread_state(saver2, thread_id)
+                assert paused is not None
+                assert paused.resumable is True
+                assert paused.next_nodes == ["understand_sub"]
+                assert len(paused.pending_interrupts) == 1
+                assert paused.pending_interrupts[0]["value"] == {
+                    "gate": "subgraph_clarification",
+                    "round": 1,
+                }
+
+                all_hist = get_thread_history(saver2, thread_id, checkpoint_ns=None)
+                root_hist = get_thread_history(saver2, thread_id, checkpoint_ns="")
+                assert any(item.checkpoint_ns.startswith("understand_sub:") for item in all_hist)
+                assert all(item.checkpoint_ns == "" for item in root_hist)
+                assert len(all_hist) > len(root_hist)
+
+                app2 = parent_builder.compile(checkpointer=saver2)
+                resumed = app2.invoke(
+                    make_resume_command({"decision": "approved"}),
+                    config=cfg,
+                )
+                assert resumed["current_phase"] == "completed"
+                assert resumed["architecture_approved"] is True
+        finally:
+            with open_sync_checkpointer(db_uri=uri) as cleanup_saver:
+                delete_thread_checkpoints(cleanup_saver, thread_id)

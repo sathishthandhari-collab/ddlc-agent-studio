@@ -1,0 +1,23 @@
+# {{ display_name }} (`{{ agent_name }}`)
+
+> Version `{{ agent_version }}` | Pattern: `{{ pattern }}` | Runtime: `{{ runtime }}` | Autonomy: `{{ autonomy_level }}`
+
+{{ agent_description }}
+
+## Architecture
+
+- **The Skeleton (Read-Only)**: `src/models/contracts_pydantic.py`, `src/core/config.py`, `src/core/telemetry.py`, `src/{% if runtime == "langgraph" %}graph.py{% else %}pipeline.py{% endif %}`, `tests/contracts/test_contracts.py`
+- **The Muscle (Editable)**: `src/tools/*.py`, `src/prompts/stage_*.jinja2`, `tests/unit/test_*.py`
+- **Single Source of Truth**: `impl_docs/`
+
+## Stages
+
+{% for stg in stages %}
+- `{{ stg.stage_id }}` (`{{ stg.stage_type }}`, `{{ stg.processing_type }}`, `{{ stg.autonomy }}`): {{ stg.description }}
+{% endfor %}
+
+## Running Tests
+
+```bash
+pytest tests/contracts tests/unit tests/integration
+```

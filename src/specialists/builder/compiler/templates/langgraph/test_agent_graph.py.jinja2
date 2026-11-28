@@ -1,0 +1,36 @@
+{{ header }}from __future__ import annotations
+
+import pytest
+from langgraph.checkpoint.memory import InMemorySaver
+
+from src.core.config import get_settings
+from src.graph import build_graph
+
+
+def test_graph_compiles_offline_with_in_memory_checkpointer() -> None:
+    settings = get_settings()
+    assert settings.ENVIRONMENT == "development"
+    compiled = build_graph(checkpointer=InMemorySaver())
+    assert compiled is not None
+    node_names = set(compiled.get_graph().nodes.keys())
+{% for stg in stages %}
+    assert {{ (stg.stage_id + "_stage") | tojson }} in node_names
+{% endfor %}
+
+
+{% for stg in stages if stg.stage_type == "delivery" and has_human_gate %}
+def test_delivery_stage_blocks_without_human_approval() -> None:
+    from src.graph import node_{{ stg.stage_id }}_stage
+
+    with pytest.raises(RuntimeError, match="human review approval"):
+        node_{{ stg.stage_id }}_stage(
+            {
+                "run_id": "test-run-001",
+                "contracts": {},
+                "reflection_count": 0,
+                "diagnostics": [],
+                "human_approved": False,
+                "review_decision": "abort",
+            }
+        )
+{% endfor %}

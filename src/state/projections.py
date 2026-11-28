@@ -270,6 +270,8 @@ class LeafCoderProjection(_ProjectionModel):
     tool_name: Optional[str] = None
     handler: Optional[str] = None
     signature: Optional[str] = None
+    prompt_template_ref: Optional[str] = None
+    output_schema: Optional[str] = None
     logic_description: Optional[str] = None
     tools: list[dict[str, Any]] = Field(default_factory=list)
     input_contract: Optional[dict[str, Any]] = None
@@ -441,7 +443,8 @@ def project_for_architect(state: Mapping[str, Any]) -> ArchitectProjection:
     # Project only the latest proposal when revising (never rejected history)
     latest_arch = get_latest_architecture(state)
     arch_feedback = state.get("architecture_feedback")
-    current_arch = latest_arch.model_copy(deep=True) if (latest_arch is not None and arch_feedback) else None
+    is_revising = bool(arch_feedback) or state.get("architecture_decision") == "revise" or mode == "change"
+    current_arch = latest_arch.model_copy(deep=True) if (latest_arch is not None and is_revising) else None
 
     enriched = [
         _coerce_model(req, ClarifiedRequirement)
@@ -487,28 +490,25 @@ def project_for_documentarian(state: Mapping[str, Any]) -> DocumentarianProjecti
     if mode == "change" and change_req is None and approved_arch is None:
         raise ProjectionError("Documentarian requires change_request or approved_architecture in change mode.")
 
-    # Filter Tier 2 component specs to only those referenced in approved_architecture (if present)
+    # Filter Tier 2 component specs strictly to those referenced in approved_architecture
     catalog = _extract_catalog(state)
     component_specs: list[dict[str, Any]] = []
     if catalog is not None:
-        if approved_arch is not None and approved_arch.reused_components:
+        if approved_arch is not None:
             wanted = {
                 str(c.get("component_id") or c.get("component_name") or c.get("name"))
                 for c in approved_arch.reused_components
                 if isinstance(c, Mapping)
+                and (c.get("component_id") or c.get("component_name") or c.get("name"))
             }
-            for comp in catalog.available_components:
-                cid = str(comp.get("component_id") or "")
-                cname = str(comp.get("component_name") or "")
-                if cid in wanted or cname in wanted:
-                    component_specs.append(_deep_clone(comp))
+            if wanted:
+                for comp in catalog.available_components:
+                    cid = str(comp.get("component_id") or "")
+                    cname = str(comp.get("component_name") or comp.get("name") or "")
+                    if cid in wanted or cname in wanted:
+                        component_specs.append(_deep_clone(comp))
         else:
             component_specs = _deep_clone(catalog.available_components)
-
-    latest_impl = get_latest_impl_docs(state)
-    current_impl_docs: Optional[ImplDocPackage] = None
-    if latest_impl is not None and (mode == "change" or state.get("impl_doc_feedback") or state.get("active_fix_instructions")):
-        current_impl_docs = _deep_clone(latest_impl.package)
 
     # Extract only documentarian-targeted validation issues (e.g., contract mismatches)
     contract_feedback: list[str] = []
@@ -520,6 +520,18 @@ def project_for_documentarian(state: Mapping[str, Any]) -> DocumentarianProjecti
             for issue in latest_report.issues
             if issue.route_target == "documentarian"
         ]
+
+    latest_impl = get_latest_impl_docs(state)
+    current_impl_docs: Optional[ImplDocPackage] = None
+    should_project_impl = (
+        mode == "change"
+        or bool(state.get("impl_doc_feedback"))
+        or state.get("impl_doc_decision") == "revise"
+        or bool(state.get("active_fix_instructions"))
+        or bool(contract_feedback)
+    )
+    if latest_impl is not None and should_project_impl:
+        current_impl_docs = _deep_clone(latest_impl.package)
 
     return DocumentarianProjection(
         run_id=str(state["run_id"]),
@@ -591,6 +603,7 @@ def project_for_leaf_coder(
 
     stage_doc = pkg.stages[stage_id]
     processing = stage_doc.get("processing") or {}
+    llm_cfg = processing.get("llm_config") or {}
     tools = list(processing.get("tools") or [])
 
     selected_tool: Optional[Mapping[str, Any]] = None
@@ -635,6 +648,8 @@ def project_for_leaf_coder(
         tool_name=str(selected_tool.get("name")) if selected_tool else tool_name,
         handler=selected_tool.get("handler") if selected_tool else None,
         signature=selected_tool.get("signature") if selected_tool else None,
+        prompt_template_ref=llm_cfg.get("prompt_template_ref"),
+        output_schema=llm_cfg.get("output_schema"),
         logic_description=processing.get("logic_description"),
         tools=_deep_clone(tools),
         input_contract=_deep_clone(in_contract),

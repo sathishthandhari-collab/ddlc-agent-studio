@@ -371,7 +371,11 @@ class PostgresCheckpointerManager:
                     "row_factory": dict_row,
                 },
             )
-            pool.open(wait=True, timeout=float(pool_cfg.connection_timeout_seconds))
+            try:
+                pool.open(wait=True, timeout=float(pool_cfg.connection_timeout_seconds))
+            except Exception:
+                _close_sync_pool_quietly(pool)
+                raise
             self._sync_pool = pool
             self._owns_sync_pool = True
             self._finalizer = weakref.finalize(self, _close_sync_pool_quietly, pool)
@@ -414,7 +418,14 @@ class PostgresCheckpointerManager:
                     "row_factory": dict_row,
                 },
             )
-            await pool.open(wait=True, timeout=float(pool_cfg.connection_timeout_seconds))
+            try:
+                await pool.open(wait=True, timeout=float(pool_cfg.connection_timeout_seconds))
+            except Exception:
+                try:
+                    await pool.close()
+                except Exception:
+                    pass
+                raise
             self._async_pool = pool
             self._owns_async_pool = True
             return pool
@@ -438,9 +449,13 @@ class PostgresCheckpointerManager:
         admin_db_uri: Optional[str] = None,
     ) -> AsyncPostgresSaver:
         """Return a pooled ``AsyncPostgresSaver`` configured with Blackboard strict serde."""
-        if verify_setup:
-            ensure_checkpointer_setup(self._db_uri, admin_db_uri=admin_db_uri)
         pool = await self.get_async_pool()
+        if verify_setup:
+            await asyncio.to_thread(
+                ensure_checkpointer_setup,
+                self._db_uri,
+                admin_db_uri=admin_db_uri,
+            )
         return AsyncPostgresSaver(conn=pool, serde=self.build_serializer())
 
     def close(self, timeout: float = 5.0) -> None:
@@ -524,7 +539,7 @@ async def open_async_checkpointer(
 def make_thread_config(
     thread_id: str,
     *,
-    checkpoint_ns: str = "",
+    checkpoint_ns: Optional[str] = None,
     checkpoint_id: Optional[str] = None,
     callbacks: Optional[Sequence[Any]] = None,
     metadata: Optional[dict[str, Any]] = None,
@@ -533,7 +548,7 @@ def make_thread_config(
     if not thread_id or not thread_id.strip():
         raise ValueError("thread_id must be a non-empty string.")
     configurable: dict[str, Any] = {"thread_id": thread_id.strip()}
-    if checkpoint_ns:
+    if checkpoint_ns is not None:
         configurable["checkpoint_ns"] = checkpoint_ns
     if checkpoint_id:
         configurable["checkpoint_id"] = checkpoint_id
@@ -668,7 +683,7 @@ def get_thread_history(
     checkpointer: BaseCheckpointSaver[Any],
     thread_id: str,
     *,
-    checkpoint_ns: str = "",
+    checkpoint_ns: Optional[str] = None,
     limit: int = 20,
 ) -> list[CheckpointSummary]:
     """List checkpoint summaries for ``thread_id`` (most recent first)."""
@@ -682,7 +697,7 @@ async def aget_thread_history(
     checkpointer: BaseCheckpointSaver[Any],
     thread_id: str,
     *,
-    checkpoint_ns: str = "",
+    checkpoint_ns: Optional[str] = None,
     limit: int = 20,
 ) -> list[CheckpointSummary]:
     """Async version of ``get_thread_history``."""

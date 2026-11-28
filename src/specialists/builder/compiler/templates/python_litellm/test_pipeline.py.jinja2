@@ -1,0 +1,14 @@
+{{ header }}from __future__ import annotations
+
+from src.core.config import get_settings
+from src.pipeline import LiteLLMAgentRunner
+
+
+def test_litellm_runner_instantiates_lazily() -> None:
+    settings = get_settings()
+    assert settings.ENVIRONMENT == "development"
+    runner = LiteLLMAgentRunner(run_id="test-run-001")
+    assert runner.run_id == "test-run-001"
+{% for stg in stages %}
+    assert hasattr(runner, "run_{{ stg.stage_id }}_stage")
+{% endfor %}

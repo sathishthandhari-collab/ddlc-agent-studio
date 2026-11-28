@@ -1,0 +1,71 @@
+{{ header }}from __future__ import annotations
+
+import os
+from functools import lru_cache
+from typing import Any, List
+
+from pydantic import BaseModel, ConfigDict, Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class FrameworkRuntimeSettings(BaseModel):
+    """Standard framework mixin for runtime state and metadata persistence."""
+
+    CHECKPOINTER_DB_URI: str = Field(
+        default_factory=lambda: os.getenv(
+            "CHECKPOINTER_DB_URI",
+            "postgresql://localhost:5432/agent_checkpoints",
+        )
+    )
+    METADATA_DB_URI: str = Field(
+        default_factory=lambda: os.getenv(
+            "METADATA_DB_URI",
+            "postgresql://localhost:5432/ddlc_metadata",
+        )
+    )
+    RAG_DB_URI: str = Field(
+        default_factory=lambda: os.getenv(
+            "RAG_DB_URI",
+            "postgresql://localhost:5432/ddlc_metadata",
+        )
+    )
+{% for model in nested_models %}
+
+class {{ model.class_name }}(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+{% if not model.fields %}
+    pass
+{% else %}
+{% for fld in model.fields %}
+    {{ fld.attr_name }}: {{ fld.annotation }} = {{ fld.default_expr }}
+{% endfor %}
+{% endif %}
+{% endfor %}
+
+class AgentSettings(BaseSettings, FrameworkRuntimeSettings):
+    """Externalized runtime configuration compiled deterministically from config.yaml."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="AGENT_",
+        env_nested_delimiter="__",
+        env_file=".env",
+        extra="ignore",
+        populate_by_name=True,
+    )
+
+    ENVIRONMENT: str = Field(default="development")
+{% for fld in top_fields %}
+    {{ fld.attr_name }}: {{ fld.annotation }} = {{ fld.default_expr }}
+{% endfor %}
+{% for sec in secret_fields %}
+    {{ sec.attr_name }}: str = Field(
+        default_factory=lambda: os.getenv({{ sec.env_key | tojson }}, ""),
+        description={{ sec.description | tojson }},
+    )
+{% endfor %}
+
+
+@lru_cache()
+def get_settings() -> AgentSettings:
+    """Lazy loader for AgentSettings supporting isolated zero-infra unit testing."""
+    return AgentSettings()

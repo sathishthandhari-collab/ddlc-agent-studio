@@ -1,0 +1,33 @@
+{{ header }}from __future__ import annotations
+
+import pytest
+from pydantic import ValidationError
+
+from src.models.contracts_pydantic import (
+{% for model in contract_models %}
+    {{ model.class_name }},
+{% endfor %}
+)
+
+{% for model in contract_models %}
+
+def test_{{ model.contract_name }}_valid_instantiation() -> None:
+    payload = {
+{% for fld in model.fields %}
+        {{ fld.name | tojson }}: {{ fld.sample_valid | repr }},
+{% endfor %}
+    }
+    instance = {{ model.class_name }}.model_validate(payload)
+    assert instance is not None
+{% for fld in model.fields if fld.sample_invalid_rule is not none %}
+
+def test_{{ model.contract_name }}_{{ fld.name }}_{{ fld.sample_invalid_rule[0] }}_rejected() -> None:
+    payload = {
+{% for inner in model.fields %}
+        {{ inner.name | tojson }}: {{ (fld.sample_invalid_rule[1] if inner.name == fld.name else inner.sample_valid) | repr }},
+{% endfor %}
+    }
+    with pytest.raises(ValidationError):
+        {{ model.class_name }}.model_validate(payload)
+{% endfor %}
+{% endfor %}

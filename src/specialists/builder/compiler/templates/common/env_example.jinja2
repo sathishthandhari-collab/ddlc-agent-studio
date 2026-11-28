@@ -1,0 +1,7 @@
+# Environment Variables for {{ display_name }} ({{ agent_name }})
+ENVIRONMENT=development
+CHECKPOINTER_DB_URI=postgresql://ddlc_app:CHANGE_ME@localhost:5432/ddlc_metadata
+METADATA_DB_URI=postgresql://ddlc_app:CHANGE_ME@localhost:5432/ddlc_metadata
+{% for sec in secret_fields %}
+{{ sec.env_key }}=
+{% endfor %}

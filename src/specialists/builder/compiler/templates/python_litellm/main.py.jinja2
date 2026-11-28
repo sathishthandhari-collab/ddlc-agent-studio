@@ -1,0 +1,27 @@
+{{ header }}from __future__ import annotations
+
+import json
+from pathlib import Path
+from uuid import uuid4
+
+import typer
+
+from src.pipeline import LiteLLMAgentRunner
+
+app = typer.Typer(name={{ agent_name | tojson }}, help={{ agent_description | tojson }})
+
+
+@app.command("run")
+def run_cmd(
+    input_file: Path = typer.Option(..., "--input", "-i", help="Path to JSON input contract payload."),
+    run_id: str = typer.Option("", "--run-id", help="Optional run UUID."),
+) -> None:
+    """Execute {{ display_name }} sequentially via LiteLLMAgentRunner."""
+    payload = json.loads(input_file.read_text(encoding="utf-8"))
+    runner = LiteLLMAgentRunner(run_id=run_id.strip() or str(uuid4()))
+    runner.execute(payload)
+    typer.echo(json.dumps(runner.context["contracts"], indent=2, default=str))
+
+
+if __name__ == "__main__":
+    app()

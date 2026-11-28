@@ -1,0 +1,442 @@
+{{ header }}from __future__ import annotations
+
+import hashlib
+import inspect
+import os
+import time
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional, TypedDict
+
+import instructor
+import litellm
+from jinja2 import Environment, FileSystemLoader, StrictUndefined
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.postgres import PostgresSaver
+from langgraph.graph import END, StateGraph
+from langgraph.types import interrupt
+
+from src.core.config import get_settings
+from src.core.telemetry import create_telemetry_handler
+{% if contract_models_to_import %}
+from src.models.contracts_pydantic import (
+{% for model_name in contract_models_to_import %}
+    {{ model_name }},
+{% endfor %}
+)
+{% endif %}
+{% for mod_path, fn_name in custom_imports %}
+from {{ mod_path }} import {{ fn_name }}
+{% endfor %}
+
+
+class AgentState(TypedDict):
+    """Typed LangGraph workflow state carrying stage contracts and routing flags."""
+
+    run_id: str
+    contracts: Dict[str, Any]
+    reflection_count: int
+    diagnostics: List[str]
+    human_approved: bool
+    review_decision: Optional[str]
+
+
+def get_instructor_client() -> Any:
+    """Lazily create an Instructor-wrapped LiteLLM completion client."""
+    os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
+    return instructor.from_litellm(litellm.completion)
+
+
+def get_prompt_env(prompts_dir: Optional[Path] = None) -> Environment:
+    """Lazily initialize Jinja2 Environment with StrictUndefined (Decision 28)."""
+    target_dir = prompts_dir or (Path(__file__).resolve().parent / "prompts")
+    return Environment(
+        loader=FileSystemLoader(str(target_dir)),
+        autoescape=False,
+        undefined=StrictUndefined,
+    )
+
+
+def _resolve_model_for_tier(settings: Any, tier: str) -> str:
+    llm_cfg = getattr(settings, "llm", None)
+    tiers = getattr(llm_cfg, "model_tiers", None) if llm_cfg is not None else None
+    if tiers is not None and hasattr(tiers, tier):
+        return str(getattr(tiers, tier))
+    if tiers is not None and hasattr(tiers, "reasoning"):
+        return str(getattr(tiers, "reasoning"))
+    return "openrouter/qwen/qwen3-coder"
+
+
+def _build_prompt_config(settings: Any) -> Dict[str, Any]:
+    """Assemble non-secret PromptContext.config mapping from AgentSettings."""
+    cfg_dict: Dict[str, Any] = {"ENVIRONMENT": getattr(settings, "ENVIRONMENT", "development")}
+{% for attr_name, raw_key in config_top_keys %}
+    _sec_{{ attr_name }} = getattr(settings, {{ attr_name | tojson }}, None)
+    if hasattr(_sec_{{ attr_name }}, "model_dump"):
+        _dumped = _sec_{{ attr_name }}.model_dump()
+        cfg_dict[{{ raw_key | tojson }}] = _dumped
+        for _k, _v in _dumped.items():
+            cfg_dict.setdefault(_k, _v)
+    elif _sec_{{ attr_name }} is not None:
+        cfg_dict[{{ raw_key | tojson }}] = _sec_{{ attr_name }}
+{% endfor %}
+    return cfg_dict
+
+
+def _partition_diagnostics(diagnostics: List[str]) -> tuple[List[str], List[str]]:
+    feedback = [
+        d.replace("Reviewer feedback: ", "", 1)
+        for d in diagnostics
+        if d.startswith("Reviewer feedback:")
+    ]
+    compiler_diags = [d for d in diagnostics if not d.startswith("Reviewer feedback:")]
+    return compiler_diags, feedback
+
+
+def _stage_claim_check_bundle(file_set: Any, sandbox_dir: str) -> Dict[str, Any]:
+    """Deterministically stage LLM GeneratedFileSet to disk with path-traversal protection (Decision 31)."""
+    bundle_id = str(uuid.uuid4())
+    bundle_path = Path(sandbox_dir) / bundle_id
+    bundle_path.mkdir(parents=True, exist_ok=True)
+    base_bundle_dir = bundle_path.resolve()
+
+    manifest: List[str] = []
+    hasher = hashlib.sha256()
+
+    for file_entry in getattr(file_set, "files", []):
+        target_path = (base_bundle_dir / file_entry.path).resolve()
+        if not target_path.is_relative_to(base_bundle_dir):
+            raise ValueError(f"Path traversal detected in LLM output: {file_entry.path}")
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        content_bytes = file_entry.content.encode("utf-8")
+        target_path.write_bytes(content_bytes)
+        rel_path = target_path.relative_to(base_bundle_dir).as_posix()
+        manifest.append(rel_path)
+        hasher.update(rel_path.encode("utf-8"))
+        hasher.update(content_bytes)
+
+    return {
+        "bundle_id": bundle_id,
+        "storage_uri": str(base_bundle_dir),
+        "file_manifest": manifest,
+        "artifact_sha256": hasher.hexdigest(),
+        "generated_at": datetime.now(timezone.utc),
+    }
+
+
+def _invoke_custom_tool(
+    func: Any,
+    *,
+    contracts: Dict[str, Any],
+    settings: Any,
+    configuration: Optional[Dict[str, Any]] = None,
+) -> Any:
+    """Invoke a custom Leaf Coder tool cleanly based on its declared callable signature."""
+    sig = inspect.signature(func)
+    params = sig.parameters
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return func(contracts=contracts, settings=settings, **(configuration or {}))
+
+    kwargs: Dict[str, Any] = {}
+    for pname in params:
+        if pname == "contracts":
+            kwargs["contracts"] = contracts
+        elif pname == "settings":
+            kwargs["settings"] = settings
+        elif configuration and pname in configuration:
+            kwargs[pname] = configuration[pname]
+
+    missing_required = [
+        p.name
+        for p in params.values()
+        if p.default is inspect.Parameter.empty and p.name not in kwargs
+    ]
+    if not missing_required:
+        return func(**kwargs)
+    return {"tool": getattr(func, "__name__", "custom_tool"), "status": "bound"}
+
+
+def invoke_shared_component(
+    component_id: str,
+    *,
+    usage_type: str = "import",
+    configuration: Optional[Dict[str, Any]] = None,
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    """Dispatch a Tier 2 shared component without duplicating its code into the agent."""
+    try:
+        from _shared import resolve_component  # type: ignore[import-not-found]
+
+        return resolve_component(
+            component_id,
+            usage_type=usage_type,
+            configuration=configuration or {},
+            **kwargs,
+        )
+    except ImportError as exc:
+        raise RuntimeError(
+            f"Shared component '{component_id}' (usage_type={usage_type}) is not mounted on PYTHONPATH."
+        ) from exc
+
+
+{% for stg in stages %}
+def node_{{ stg.stage_id }}_stage(state: AgentState) -> Dict[str, Any]:
+    """Stage '{{ stg.stage_id }}' ({{ stg.stage_type }} / {{ stg.processing_type }}): {{ stg.description }}"""
+    settings = get_settings()
+{% if stg.processing_type == "llm_reasoning" %}
+    contracts = dict(state.get("contracts") or {})
+{% if stg.input_contract and stg.input_model %}
+    input_data = {{ stg.input_model }}.model_validate(contracts[{{ stg.input_contract | tojson }}]) if {{ stg.input_contract | tojson }} in contracts else contracts
+{% else %}
+    input_data = contracts
+{% endif %}
+    compiler_diags, human_feedback = _partition_diagnostics(list(state.get("diagnostics") or []))
+    prompt_cfg = _build_prompt_config(settings)
+{% if stg.prompt_template_name %}
+    prompt_tmpl = get_prompt_env().get_template({{ stg.prompt_template_name | tojson }})
+    prompt_content = prompt_tmpl.render(
+        input=input_data,
+        diagnostics=compiler_diags,
+        feedback=human_feedback,
+        config=prompt_cfg,
+    )
+{% else %}
+    prompt_content = str(input_data)
+{% endif %}
+    client = get_instructor_client()
+    model_name = _resolve_model_for_tier(settings, {{ stg.model_tier | tojson }})
+    system_msg = {{ (stg.system_prompt or ("Execute stage: " + stg.stage_name)) | tojson }}
+    llm_result = client.chat.completions.create(
+        model=model_name,
+        response_model={{ stg.llm_output_model }},
+        messages=[
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": prompt_content},
+        ],
+        temperature={{ stg.temperature }},
+        max_tokens={{ stg.max_tokens }},
+    )
+{% if stg.llm_output_model == "GeneratedFileSet" and stg.output_model and stg.output_contract %}
+    sandbox_dir = getattr(getattr(settings, "dbt", None), "sandbox_project_dir", "./sandbox/artifacts")
+    staged = _stage_claim_check_bundle(llm_result, sandbox_dir=sandbox_dir)
+    out_model = {{ stg.output_model }}.model_validate(staged)
+    return {
+        "contracts": {**contracts, {{ stg.output_contract | tojson }}: out_model.model_dump()},
+        "diagnostics": [],
+    }
+{% elif stg.output_contract %}
+    return {
+        "contracts": {**contracts, {{ stg.output_contract | tojson }}: llm_result.model_dump()},
+        "diagnostics": [],
+    }
+{% else %}
+    return {"diagnostics": []}
+{% endif %}
+{% elif stg.processing_type == "human_gate" %}
+    contracts = dict(state.get("contracts") or {})
+{% if stg.input_contract %}
+    gate_subject = contracts.get({{ stg.input_contract | tojson }}, {})
+{% else %}
+    gate_subject = contracts
+{% endif %}
+    approval_payload = interrupt({
+        "task": {{ ("review_" + stg.stage_id) | tojson }},
+        "stage_id": {{ stg.stage_id | tojson }},
+        "subject": gate_subject,
+        "diagnostics": list(state.get("diagnostics") or []),
+    })
+    decision = str(approval_payload.get("decision", "abort"))
+    feedback = approval_payload.get("feedback")
+    reviewer = str(approval_payload.get("approved_by", "human_reviewer"))
+    diagnostics = list(state.get("diagnostics") or [])
+    if feedback:
+        diagnostics.append(f"Reviewer feedback: {feedback}")
+
+    contracts_update: Dict[str, Any] = {}
+{% if stg.output_contract and stg.output_model %}
+    if decision == "approved":
+        bundle_id = (
+            gate_subject.get("bundle_id")
+            if isinstance(gate_subject, dict) and gate_subject.get("bundle_id")
+            else str(state.get("run_id", uuid.uuid4()))
+        )
+        reviewed = {{ stg.output_model }}.model_validate({
+            "bundle_id": bundle_id,
+            "approved_by": reviewer,
+            "approval_timestamp": datetime.now(timezone.utc),
+        })
+        contracts_update[{{ stg.output_contract | tojson }}] = reviewed.model_dump()
+{% endif %}
+    return {
+        "contracts": {**contracts, **contracts_update},
+        "human_approved": (decision == "approved"),
+        "review_decision": decision,
+        "diagnostics": diagnostics,
+        "reflection_count": 0 if decision == "revise" else int(state.get("reflection_count", 0)),
+    }
+{% elif stg.stage_type == "delivery" %}
+    contracts = dict(state.get("contracts") or {})
+{% if has_human_gate %}
+    if not state.get("human_approved", False):
+        raise RuntimeError("Delivery attempted without explicit human review approval.")
+{% endif %}
+    try:
+        delivery_payload: Dict[str, Any] = {
+            "manifest_id": str(uuid.uuid4()),
+            "run_id": state["run_id"],
+            "delivered_at": datetime.now(timezone.utc),
+        }
+{% for st_ref in stg.shared_tools %}
+        res_{{ loop.index }} = invoke_shared_component(
+            {{ st_ref.name | tojson }},
+            usage_type={{ st_ref.usage_type | tojson }},
+            configuration={{ st_ref.configuration | repr }},
+            run_id=state["run_id"],
+            contracts=contracts,
+            settings=settings,
+        )
+        if isinstance(res_{{ loop.index }}, dict):
+            delivery_payload.update(res_{{ loop.index }})
+{% endfor %}
+{% for ct_ref in stg.custom_tools %}
+        res_custom_{{ loop.index }} = _invoke_custom_tool(
+            {{ ct_ref.func_name }},
+            contracts=contracts,
+            settings=settings,
+            configuration={{ ct_ref.configuration | repr }},
+        )
+        if isinstance(res_custom_{{ loop.index }}, dict):
+            delivery_payload.update(res_custom_{{ loop.index }})
+{% endfor %}
+{% if stg.output_contract and stg.output_model %}
+        manifest = {{ stg.output_model }}.model_validate(delivery_payload)
+        return {
+            "contracts": {**contracts, {{ stg.output_contract | tojson }}: manifest.model_dump()},
+            "diagnostics": [],
+        }
+{% else %}
+        return {"diagnostics": []}
+{% endif %}
+    except Exception as exc:
+        raise RuntimeError(f"Delivery failed at stage '{{ stg.stage_id }}': {exc}") from exc
+{% else %}
+    contracts = dict(state.get("contracts") or {})
+    start_ts = time.time()
+    stage_payload: Dict[str, Any] = {}
+{% for st_ref in stg.shared_tools %}
+    shared_out_{{ loop.index }} = invoke_shared_component(
+        {{ st_ref.name | tojson }},
+        usage_type={{ st_ref.usage_type | tojson }},
+        configuration={{ st_ref.configuration | repr }},
+        run_id=state["run_id"],
+        contracts=contracts,
+        settings=settings,
+    )
+    if isinstance(shared_out_{{ loop.index }}, dict):
+        stage_payload.update(shared_out_{{ loop.index }})
+{% endfor %}
+{% for ct_ref in stg.custom_tools %}
+    custom_out_{{ loop.index }} = _invoke_custom_tool(
+        {{ ct_ref.func_name }},
+        contracts=contracts,
+        settings=settings,
+        configuration={{ ct_ref.configuration | repr }},
+    )
+    if isinstance(custom_out_{{ loop.index }}, dict):
+        stage_payload.update(custom_out_{{ loop.index }})
+{% endfor %}
+    elapsed = round(time.time() - start_ts, 3)
+    stage_payload.setdefault("sandbox_runtime_seconds", elapsed)
+{% if stg.output_contract and stg.output_model %}
+    out_obj = {{ stg.output_model }}.model_validate(stage_payload)
+    out_dump = out_obj.model_dump()
+    errors = list(out_dump.get("compilation_errors") or out_dump.get("errors") or [])
+    next_reflections = int(state.get("reflection_count", 0)) + (1 if errors else 0)
+    return {
+        "contracts": {**contracts, {{ stg.output_contract | tojson }}: out_dump},
+        "diagnostics": errors,
+        "reflection_count": next_reflections,
+    }
+{% else %}
+    return {"diagnostics": []}
+{% endif %}
+{% endif %}
+
+
+{% if stg.on_error_stage %}
+def route_{{ stg.stage_id }}(state: AgentState) -> str:
+    """Deterministic reflection routing edge for stage '{{ stg.stage_id }}'."""
+    if state.get("diagnostics"):
+        if int(state.get("reflection_count", 0)) < {{ stg.max_reflection_retries }}:
+            return {{ (stg.on_error_stage + "_stage") | tojson }}
+        return {{ ((stg.next_stage + "_stage") if stg.next_stage else "__end__") | tojson }}
+    return {{ ((stg.next_stage + "_stage") if stg.next_stage else "__end__") | tojson }}
+
+
+{% elif stg.transitions %}
+def route_{{ stg.stage_id }}(state: AgentState) -> str:
+    """Deterministic multi-way routing edge for gate stage '{{ stg.stage_id }}'."""
+    decision = str(state.get("review_decision") or "abort")
+    if decision == "approved":
+        return {{ ((stg.transitions.get("on_approved") + "_stage") if stg.transitions.get("on_approved") else "__end__") | tojson }}
+    if decision == "revise":
+        return {{ ((stg.transitions.get("on_revise") + "_stage") if stg.transitions.get("on_revise") else "__end__") | tojson }}
+    return {{ ((stg.transitions.get("on_abort") + "_stage") if stg.transitions.get("on_abort") else "__end__") | tojson }}
+
+
+{% endif %}
+{% endfor %}
+
+def build_graph(checkpointer: Optional[Any] = None) -> Any:
+    """Compile the deterministic LangGraph StateGraph for {{ agent_name }}."""
+    workflow = StateGraph(AgentState)
+{% for stg in stages %}
+    workflow.add_node({{ (stg.stage_id + "_stage") | tojson }}, node_{{ stg.stage_id }}_stage)
+{% endfor %}
+    workflow.set_entry_point({{ (entry_stage_id + "_stage") | tojson }})
+{% for stg in stages %}
+{% if stg.on_error_stage or stg.transitions %}
+    workflow.add_conditional_edges({{ (stg.stage_id + "_stage") | tojson }}, route_{{ stg.stage_id }})
+{% elif stg.next_stage %}
+    workflow.add_edge({{ (stg.stage_id + "_stage") | tojson }}, {{ (stg.next_stage + "_stage") | tojson }})
+{% else %}
+    workflow.add_edge({{ (stg.stage_id + "_stage") | tojson }}, END)
+{% endif %}
+{% endfor %}
+    if checkpointer is not None:
+        return workflow.compile(checkpointer=checkpointer)
+    settings = get_settings()
+    try:
+        cm = PostgresSaver.from_conn_string(settings.CHECKPOINTER_DB_URI)
+        saver = cm.__enter__()
+        return workflow.compile(checkpointer=saver)
+    except Exception:
+        return workflow.compile(checkpointer=InMemorySaver())
+
+
+def run_agent(run_id: str, input_payload: Dict[str, Any], *, checkpointer: Optional[Any] = None) -> Any:
+    """Execute {{ agent_name }} with Tier 1 MetadataCallbackHandler telemetry."""
+    settings = get_settings()
+    app = build_graph(checkpointer=checkpointer)
+    telemetry_handler = create_telemetry_handler(
+        run_id=run_id,
+        db_uri=settings.METADATA_DB_URI,
+    )
+    config = {
+        "callbacks": [telemetry_handler],
+        "configurable": {"thread_id": run_id},
+    }
+    initial_state: AgentState = {
+        "run_id": run_id,
+{% if first_input_contract %}
+        "contracts": { {{ first_input_contract | tojson }}: input_payload },
+{% else %}
+        "contracts": dict(input_payload),
+{% endif %}
+        "reflection_count": 0,
+        "diagnostics": [],
+        "human_approved": False,
+        "review_decision": None,
+    }
+    return app.invoke(initial_state, config=config)
