@@ -20,7 +20,7 @@ tiers:
 
   fast:
     description: "Mechanical checks, formatting, validation summaries"
-    model: "openrouter/qwen/qwen3-32b"
+    model: "openrouter/meta-llama/llama-3.3-70b-instruct"
     temperature: 0.0
     max_tokens: 4096
 
